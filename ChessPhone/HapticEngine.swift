@@ -16,7 +16,7 @@ class HapticEngine {
             await playPulses(count: fromRow)
             try? await Task.sleep(nanoseconds: 600_000_000)
 
-            notify.notificationOccurred(.success)
+            await notify.notificationOccurred(.success)
             try? await Task.sleep(nanoseconds: 600_000_000)
 
             await playPulses(count: toCol)

@@ -5,11 +5,10 @@ import ChessKitEngine
 /// loads the bundled NNUE network files, and exposes a simple
 /// async "give me a move" call.
 ///
-/// Two spots below are marked NOTE — they're written against the
-/// library's documented usage examples, but the exact property/case
-/// shape wasn't independently confirmed against the source. If Xcode
-/// flags either, autocomplete on the type will show the real shape;
-/// it's a small fix either way.
+/// The `.bestmove` case shape and `.start()` being async were confirmed
+/// against a real build log. One spot below is still marked NOTE — the
+/// `.position(.startpos, moves:)` call is written against standard UCI
+/// but wasn't independently confirmed against this library's source.
 @MainActor
 final class EngineManager {
     static let shared = EngineManager()
@@ -33,7 +32,7 @@ final class EngineManager {
             return
         }
 
-        engine.start()
+        await engine.start()
 
         Task {
             for await response in await engine.responseStream! {
@@ -47,11 +46,8 @@ final class EngineManager {
 
     private func handle(_ response: EngineResponse) async {
         switch response {
-        case let .bestmove(move):
-            // NOTE: written assuming a `.bestMove` string property on the
-            // associated value, per the library's UCI "bestmove <move>"
-            // output. Check autocomplete here if this doesn't compile.
-            pendingContinuation?.resume(returning: move.bestMove)
+        case .bestmove(move: let move, ponder: _):
+            pendingContinuation?.resume(returning: move)
             pendingContinuation = nil
         default:
             break
