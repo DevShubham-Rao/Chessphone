@@ -1,16 +1,18 @@
 import UIKit
 
-/// Turns moves into pulse counts using the Taptic Engine.
+/// Converts chess coordinates into a deliberately slow, easy-to-count haptic language.
 ///
-/// A move is played as:
-///   [from column pulses] pause [from row pulses] pause  (success buzz)  pause
-///   [to column pulses]   pause [to row pulses]
-///   optionally: pause [promotion pulses: 1=Q 2=R 3=B 4=N]
-///   optionally: pause [check = two warning buzzes | game over = three heavy thumps]
-/// Columns are 1...8 for a...h and rows are 1...8, the same numbers you type in.
+/// EASY mode:
+///   - A strong "start" buzz
+///   - FROM file: 1...8 medium pulses
+///   - long separator
+///   - FROM rank: 1...8 medium pulses
+///   - two strong marker buzzes
+///   - TO file: 1...8 medium pulses
+///   - long separator
+///   - TO rank: 1...8 medium pulses
 ///
-/// Only one playback runs at a time: starting a new one (or calling `cancel()`)
-/// stops the previous one, so repeats/shakes can never pile up on top of each other.
+/// The extra separators/markers make it much harder to lose your place.
 @MainActor
 final class HapticEngine {
     static let shared = HapticEngine()
@@ -21,69 +23,141 @@ final class HapticEngine {
         case gameOver
     }
 
+    enum Clarity: String, CaseIterable, Identifiable {
+        case easy = "Easy"
+        case fast = "Fast"
+
+        var id: String { rawValue }
+
+        var pulseGap: Double {
+            switch self {
+            case .easy: return 0.30
+            case .fast: return 0.14
+            }
+        }
+
+        var coordinatePause: Double {
+            switch self {
+            case .easy: return 0.85
+            case .fast: return 0.42
+            }
+        }
+
+        var movePause: Double {
+            switch self {
+            case .easy: return 1.05
+            case .fast: return 0.55
+            }
+        }
+    }
+
     private let impact = UIImpactFeedbackGenerator(style: .medium)
     private let heavy = UIImpactFeedbackGenerator(style: .heavy)
     private let notify = UINotificationFeedbackGenerator()
     private var playback: Task<Void, Never>?
 
-    // MARK: - Single haptics (immediate feedback for button presses)
+    private let clarityKey = "hapticClarity"
 
-    /// One short tick per volume-up press.
+    var clarity: Clarity {
+        get {
+            Clarity(rawValue: UserDefaults.standard.string(forKey: clarityKey) ?? "") ?? .easy
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: clarityKey)
+        }
+    }
+
+    func setClarity(_ value: Clarity) {
+        clarity = value
+    }
+
+    // MARK: - Immediate feedback
+
     func tick() {
         impact.impactOccurred()
     }
 
-    /// An input step was accepted.
     func confirm() {
         notify.notificationOccurred(.success)
     }
 
-    /// Bad input / illegal move / engine problem.
     func error() {
         notify.notificationOccurred(.error)
     }
 
-    // MARK: - Sequences
+    /// A short, very distinct preview of the selected haptic mode.
+    func testPattern() {
+        cancel()
+        playback = Task { [weak self] in
+            guard let self = self else { return }
+            self.heavy.impactOccurred()
+            await self.pause(self.clarity.coordinatePause)
+            await self.pulses(3)
+            await self.pause(self.clarity.coordinatePause)
+            self.heavy.impactOccurred()
+        }
+    }
+
+    // MARK: - Chess move output
 
     func playMove(fromFile: Int, fromRank: Int, toFile: Int, toRank: Int,
                   promotion: Int = 0, suffix: Suffix = .none) {
         cancel()
+        let clarity = self.clarity
+
         playback = Task { [weak self] in
             guard let self = self else { return }
-            await self.pulses(fromFile)
-            await self.pause(0.45)
-            await self.pulses(fromRank)
-            await self.pause(0.6)
-            if Task.isCancelled { return }
-            self.notify.notificationOccurred(.success)
-            await self.pause(0.6)
-            await self.pulses(toFile)
-            await self.pause(0.45)
-            await self.pulses(toRank)
+
+            // Start marker: one heavy buzz means "new move".
+            self.heavy.impactOccurred()
+            await self.pause(clarity.movePause)
+
+            // FROM coordinate
+            await self.coordinate(fromFile, clarity: clarity)
+            await self.pause(clarity.coordinatePause)
+            await self.coordinate(fromRank, clarity: clarity)
+
+            // Two heavy buzzes = FROM is complete.
+            await self.pause(clarity.movePause)
+            self.heavy.impactOccurred()
+            await self.pause(0.22)
+            self.heavy.impactOccurred()
+
+            await self.pause(clarity.movePause)
+
+            // TO coordinate
+            await self.coordinate(toFile, clarity: clarity)
+            await self.pause(clarity.coordinatePause)
+            await self.coordinate(toRank, clarity: clarity)
 
             if promotion > 0 {
-                await self.pause(0.8)
-                await self.pulses(promotion, generator: self.heavy)
+                await self.pause(clarity.movePause)
+                await self.pulses(promotion, generator: self.heavy, gap: clarity.pulseGap)
             }
 
             switch suffix {
             case .none:
                 break
             case .check:
-                await self.pause(0.8)
-                if Task.isCancelled { return }
+                await self.pause(clarity.movePause)
                 self.notify.notificationOccurred(.warning)
-                await self.pause(0.35)
-                if Task.isCancelled { return }
+                await self.pause(0.4)
                 self.notify.notificationOccurred(.warning)
             case .gameOver:
-                await self.pause(0.8)
+                await self.pause(clarity.movePause)
                 await self.pulses(3, generator: self.heavy, gap: 0.5)
             }
         }
     }
 
-    /// Long triple thump for "the game just ended" when no move needs replaying.
+    private func coordinate(_ count: Int, clarity: Clarity) async {
+        // A heavy marker before every coordinate tells the user where counting starts.
+        if Task.isCancelled { return }
+        heavy.impactOccurred()
+        await pause(0.28)
+        await pulses(count, gap: clarity.pulseGap)
+    }
+
     func playGameOver() {
         cancel()
         playback = Task { [weak self] in
@@ -97,15 +171,16 @@ final class HapticEngine {
         playback = nil
     }
 
-    // MARK: - Helpers
-
-    private func pulses(_ count: Int, generator: UIImpactFeedbackGenerator? = nil, gap: Double = 0.18) async {
+    private func pulses(_ count: Int, generator: UIImpactFeedbackGenerator? = nil,
+                        gap: Double? = nil) async {
         let gen = generator ?? impact
+        let actualGap = gap ?? clarity.pulseGap
         guard count > 0 else { return }
+
         for _ in 0..<count {
             if Task.isCancelled { return }
             gen.impactOccurred()
-            await pause(gap)
+            await pause(actualGap)
         }
     }
 
