@@ -2,5 +2,4 @@ build/
 dist/
 *.xcodeproj
 .DS_Store
-Resources/*.nnue
 .build/
