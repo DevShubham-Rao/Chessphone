@@ -55,11 +55,27 @@ final class EngineManager {
         lastError = ""
 
         if engine == nil {
+            // Stockfish 17 cannot finish starting without its two NNUE nets, so
+            // check the bundle first and report a precise reason on screen.
+            let hasBig = Bundle.main.url(forResource: "nn-1111cefa1111", withExtension: "nnue") != nil
+            let hasSmall = Bundle.main.url(forResource: "nn-37f18f62d772", withExtension: "nnue") != nil
+            guard hasBig && hasSmall else {
+                return fail("NNUE files missing from the app bundle (big: \(hasBig), small: \(hasSmall)). Put both in Resources/ before building.")
+            }
+
             let newEngine = Engine(type: .stockfish)
             await newEngine.start()
 
+            // start() can return before Stockfish finishes its uci/isready
+            // handshake (loading the ~75 MB net takes a moment). Wait up to 30 s.
+            var attempts = 0
+            while !(await newEngine.isRunning) && attempts < 300 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                attempts += 1
+            }
+
             guard await newEngine.isRunning else {
-                return fail("Stockfish did not start.")
+                return fail("Stockfish did not start (no ready signal after 30 s).")
             }
             guard let stream = await newEngine.responseStream else {
                 return fail("Stockfish started but has no response stream.")
