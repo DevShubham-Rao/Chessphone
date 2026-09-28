@@ -67,11 +67,17 @@ class ChessPhoneViewModel: ObservableObject {
         sendMoveToEngine(move)
     }
 
-private func sendMoveToEngine(_ move: String) {
-    let fen = currentFEN
-    Task.detached(priority: .userInitiated) {
-        let reply = StubEngine.bestMove(forFEN: fen)
-        await MainActor.run {
+    private func sendMoveToEngine(_ move: String) {
+        let fen = currentFEN
+        Task.detached(priority: .userInitiated) {
+            let reply = StubEngine.bestMove(forFEN: fen)
+            await MainActor.run {
+                self.lastEngineMove = reply
+                self.playHapticsForEngineMove(reply)
+                self.phase = .sourceColumn
+            }
+        }
+    }
 
     private func playHapticsForEngineMove(_ move: String) {
         guard move.count == 4 else { return }
