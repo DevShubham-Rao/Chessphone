@@ -1,69 +1,115 @@
 import UIKit
 
-/// Output pattern, designed to be countable by feel:
-/// - "vir vir vir": one distinct pulse per count, with a real gap
-///   between each pulse so they don't blur together.
-/// - short "virrrrr" (rapid burst): marks switching from column to
-///   row within the same square.
-/// - long "VIRRRRR" (longer rapid burst + a closing tick): marks
-///   switching from the source square to the target square.
-class HapticEngine {
+/// Turns moves into pulse counts using the Taptic Engine.
+///
+/// A move is played as:
+///   [from column pulses] pause [from row pulses] pause  (success buzz)  pause
+///   [to column pulses]   pause [to row pulses]
+///   optionally: pause [promotion pulses: 1=Q 2=R 3=B 4=N]
+///   optionally: pause [check = two warning buzzes | game over = three heavy thumps]
+/// Columns are 1...8 for a...h and rows are 1...8, the same numbers you type in.
+///
+/// Only one playback runs at a time: starting a new one (or calling `cancel()`)
+/// stops the previous one, so repeats/shakes can never pile up on top of each other.
+@MainActor
+final class HapticEngine {
     static let shared = HapticEngine()
+
+    enum Suffix {
+        case none
+        case check
+        case gameOver
+    }
+
     private let impact = UIImpactFeedbackGenerator(style: .medium)
-    private let heavyImpact = UIImpactFeedbackGenerator(style: .heavy)
-    private let lightImpact = UIImpactFeedbackGenerator(style: .light)
+    private let heavy = UIImpactFeedbackGenerator(style: .heavy)
     private let notify = UINotificationFeedbackGenerator()
+    private var playback: Task<Void, Never>?
 
-    private let pulseGap: UInt64 = 450_000_000        // gap between counted pulses ("vir" ... "vir")
-    private let burstPulseGap: UInt64 = 90_000_000     // gap inside a buzz burst
-    private let afterSignalPause: UInt64 = 500_000_000 // breathing room after each phase
+    // MARK: - Single haptics (immediate feedback for button presses)
 
-    func playMove(fromCol: Int, fromRow: Int, toCol: Int, toRow: Int) {
-        Task {
-            await playPulses(count: fromCol)
-            await playColRowBuzz()
+    /// One short tick per volume-up press.
+    func tick() {
+        impact.impactOccurred()
+    }
 
-            await playPulses(count: fromRow)
-            await playSquareDividerBuzz()
+    /// An input step was accepted.
+    func confirm() {
+        notify.notificationOccurred(.success)
+    }
 
-            await playPulses(count: toCol)
-            await playColRowBuzz()
+    /// Bad input / illegal move / engine problem.
+    func error() {
+        notify.notificationOccurred(.error)
+    }
 
-            await playPulses(count: toRow)
+    // MARK: - Sequences
+
+    func playMove(fromFile: Int, fromRank: Int, toFile: Int, toRank: Int,
+                  promotion: Int = 0, suffix: Suffix = .none) {
+        cancel()
+        playback = Task { [weak self] in
+            guard let self = self else { return }
+            await self.pulses(fromFile)
+            await self.pause(0.45)
+            await self.pulses(fromRank)
+            await self.pause(0.6)
+            if Task.isCancelled { return }
+            self.notify.notificationOccurred(.success)
+            await self.pause(0.6)
+            await self.pulses(toFile)
+            await self.pause(0.45)
+            await self.pulses(toRank)
+
+            if promotion > 0 {
+                await self.pause(0.8)
+                await self.pulses(promotion, generator: self.heavy)
+            }
+
+            switch suffix {
+            case .none:
+                break
+            case .check:
+                await self.pause(0.8)
+                if Task.isCancelled { return }
+                self.notify.notificationOccurred(.warning)
+                await self.pause(0.35)
+                if Task.isCancelled { return }
+                self.notify.notificationOccurred(.warning)
+            case .gameOver:
+                await self.pause(0.8)
+                await self.pulses(3, generator: self.heavy, gap: 0.5)
+            }
         }
     }
 
-    /// Single lightweight pulse for raw button-tap confirmation while
-    /// counting input - separate from the move-relay pattern above.
-    func tapTick() {
-        lightImpact.impactOccurred()
+    /// Long triple thump for "the game just ended" when no move needs replaying.
+    func playGameOver() {
+        cancel()
+        playback = Task { [weak self] in
+            guard let self = self else { return }
+            await self.pulses(3, generator: self.heavy, gap: 0.5)
+        }
     }
 
-    private func playPulses(count: Int) async {
+    func cancel() {
+        playback?.cancel()
+        playback = nil
+    }
+
+    // MARK: - Helpers
+
+    private func pulses(_ count: Int, generator: UIImpactFeedbackGenerator? = nil, gap: Double = 0.18) async {
+        let gen = generator ?? impact
+        guard count > 0 else { return }
         for _ in 0..<count {
-            await MainActor.run { impact.impactOccurred() }
-            try? await Task.sleep(nanoseconds: pulseGap)
+            if Task.isCancelled { return }
+            gen.impactOccurred()
+            await pause(gap)
         }
-        try? await Task.sleep(nanoseconds: afterSignalPause)
     }
 
-    /// Short rapid burst ("virrrrr") - column -> row within a square.
-    private func playColRowBuzz() async {
-        for _ in 0..<5 {
-            await MainActor.run { heavyImpact.impactOccurred() }
-            try? await Task.sleep(nanoseconds: burstPulseGap)
-        }
-        try? await Task.sleep(nanoseconds: afterSignalPause)
-    }
-
-    /// Longer rapid burst + closing tick ("VIRRRRR") - source square ->
-    /// target square. Noticeably longer than the column/row buzz above.
-    private func playSquareDividerBuzz() async {
-        for _ in 0..<10 {
-            await MainActor.run { heavyImpact.impactOccurred() }
-            try? await Task.sleep(nanoseconds: burstPulseGap)
-        }
-        await notify.notificationOccurred(.success)
-        try? await Task.sleep(nanoseconds: afterSignalPause + 100_000_000)
+    private func pause(_ seconds: Double) async {
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
     }
 }

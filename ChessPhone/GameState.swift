@@ -1,127 +1,403 @@
 import SwiftUI
 import Combine
+import UIKit
 
-enum InputPhase {
+enum InputPhase: Equatable {
     case selectSide
     case sourceColumn, sourceRow
     case targetColumn, targetRow
+    case promotion
     case engineCalculating
+    case engineFailed
+    case gameOver
 }
 
+/// Input scheme
+///   Volume UP        : count taps (columns 1-8 = a-h, rows 1-8, promotion 1-4)
+///   Volume DOWN      : confirm the count and go to the next step
+///   0 taps + confirm : cancel the move you're entering
+///   Shake            : replay the engine's last move as haptics
+///
+/// Columns/rows are always real board coordinates (a1 = 1,1 ... h8 = 8,8),
+/// regardless of which side you play. Only the on-screen board flips.
 @MainActor
-class ChessPhoneViewModel: ObservableObject {
-    @Published var phase: InputPhase = .selectSide
-    @Published var tapCount: Int = 0
-    @Published var playerColor: String = ""
-    @Published var board = BoardModel()
+final class ChessPhoneViewModel: ObservableObject {
+    @Published private(set) var phase: InputPhase = .selectSide
+    @Published private(set) var tapCount: Int = 0
+    @Published private(set) var playerColor: PieceColor = .white
+    @Published private(set) var game = ChessGame()
+    @Published private(set) var lastMove: Move?
+    @Published private(set) var selectedSquare: Int?
+    @Published private(set) var legalTargets: Set<Int> = []
+    @Published private(set) var status: String = "Choose your side."
+    @Published private(set) var engineStatus: String = "Engine: starting..."
+    @Published private(set) var lastEngineMove: String = ""
 
-    private var sourceCol = 0
-    private var sourceRow = 0
-    private var targetCol = 0
-    private var targetRow = 0
+    // Half-entered move (0-based file / rank)
+    private var sourceFile = 0
+    private var sourceRank = 0
+    private var targetFile = 0
+    private var promotionCandidates: [Move] = []
 
-    private var moveHistory: [String] = []
-    private var lastEngineMove = ""
+    private var engineTask: Task<Void, Never>?
+    /// Bumped on every new game so a late engine answer from an old game is ignored.
+    private var gameGeneration = 0
+    private let shake = ShakeDetector()
+    private var inputsRunning = false
+
+    // MARK: - Lifecycle
+
+    func startInputs() {
+        guard !inputsRunning else { return }
+        inputsRunning = true
+
+        VolumeButtonHandler.shared.onVolumeUp = { [weak self] in
+            Task { @MainActor in self?.handleVolumeUp() }
+        }
+        VolumeButtonHandler.shared.onVolumeDown = { [weak self] in
+            Task { @MainActor in self?.handleVolumeDown() }
+        }
+        VolumeButtonHandler.shared.start()
+
+        shake.onShake = { [weak self] in
+            Task { @MainActor in self?.handleShakeRepeat() }
+        }
+        shake.start()
+
+        // Volume buttons only work while the screen is on and the app is active.
+        UIApplication.shared.isIdleTimerDisabled = true
+
+        Task { await warmUpEngine() }
+    }
+
+    func stopInputs() {
+        inputsRunning = false
+        VolumeButtonHandler.shared.stop()
+        shake.stop()
+        UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    private func warmUpEngine() async {
+        engineStatus = "Engine: starting..."
+        let ok = await EngineManager.shared.ensureStarted()
+        engineStatus = ok ? "Engine: Stockfish ready" : "Engine: FAILED - \(EngineManager.shared.lastError)"
+    }
+
+    // MARK: - Screen text
+
+    var phasePrompt: String {
+        switch phase {
+        case .selectSide: return "Choose your side"
+        case .sourceColumn: return "FROM column (1=a ... 8=h)"
+        case .sourceRow: return "FROM row (1-8)"
+        case .targetColumn: return "TO column (1=a ... 8=h)"
+        case .targetRow: return "TO row (1-8)"
+        case .promotion: return "PROMOTE to (1=Q 2=R 3=B 4=N)"
+        case .engineCalculating: return "Engine is thinking..."
+        case .engineFailed: return "Engine problem"
+        case .gameOver: return "Game over"
+        }
+    }
+
+    /// What the current tap count means for the current step, e.g. "3 = c".
+    var inputPreview: String {
+        guard tapCount > 0 else { return "-" }
+        switch phase {
+        case .sourceColumn, .targetColumn:
+            return "\(tapCount) = \(Square.fileLetters[min(tapCount, 8) - 1])"
+        case .promotion:
+            let names = [1: "Queen", 2: "Rook", 3: "Bishop", 4: "Knight"]
+            return "\(tapCount) = \(names[tapCount] ?? "?")"
+        default:
+            return "\(tapCount)"
+        }
+    }
+
+    // MARK: - Hardware input
 
     func handleVolumeUp() {
-        guard phase != .selectSide, phase != .engineCalculating else { return }
-        tapCount += 1
-        HapticEngine.shared.tapTick()
-    }
-
-    func handleVolumeDown() {
-        guard phase != .selectSide, phase != .engineCalculating else { return }
-        advancePhase()
-    }
-
-    func handleShakeRepeat() {
-        guard !lastEngineMove.isEmpty else { return }
-        playHapticsForEngineMove(lastEngineMove)
-    }
-
-    func selectColor(_ color: String) {
-        playerColor = color
-        if color == "WHITE" {
-            sendMoveToEngine("e2e4") // already absolute - White's own view == absolute
-        }
-        phase = .sourceColumn
-    }
-
-    private func advancePhase() {
         switch phase {
-        case .sourceColumn:
-            sourceCol = tapCount; tapCount = 0; phase = .sourceRow
-        case .sourceRow:
-            sourceRow = tapCount; tapCount = 0; phase = .targetColumn
-        case .targetColumn:
-            targetCol = tapCount; tapCount = 0; phase = .targetRow
-        case .targetRow:
-            targetRow = tapCount; tapCount = 0; processPlayerMove()
+        case .sourceColumn, .sourceRow, .targetColumn, .targetRow, .promotion:
+            let limit = phase == .promotion ? 4 : 8
+            if tapCount >= limit {
+                HapticEngine.shared.error()
+                status = "Maximum is \(limit)."
+                return
+            }
+            tapCount += 1
+            HapticEngine.shared.tick()
         default:
             break
         }
     }
 
-    private func processPlayerMove() {
-        // Taps are entered from the PLAYER's own side of the board.
-        // Convert to absolute board coordinates before building the
-        // UCI move string that goes to the engine and the debug board.
-        let (absSourceCol, absSourceRow) = toAbsolute(col: sourceCol, row: sourceRow)
-        let (absTargetCol, absTargetRow) = toAbsolute(col: targetCol, row: targetRow)
-        let move = "\(numberToCol(absSourceCol))\(absSourceRow)\(numberToCol(absTargetCol))\(absTargetRow)"
-        phase = .engineCalculating
-        sendMoveToEngine(move)
-    }
-
-    /// Expects and produces ABSOLUTE UCI move strings (engine's own
-    /// coordinate system). Perspective conversion happens at the edges:
-    /// processPlayerMove() converts taps -> absolute before calling this,
-    /// playHapticsForEngineMove() converts absolute -> player view after.
-    private func sendMoveToEngine(_ absoluteMove: String) {
-        moveHistory.append(absoluteMove)
-        board.apply(uciMove: absoluteMove)
-        Task {
-            await EngineManager.shared.start()
-            let reply = await EngineManager.shared.bestMove(forMoveHistory: moveHistory) ?? "e7e5"
-            moveHistory.append(reply)
-            board.apply(uciMove: reply)
-            self.lastEngineMove = reply
-            self.playHapticsForEngineMove(reply)
-            self.phase = .sourceColumn
+    func handleVolumeDown() {
+        switch phase {
+        case .sourceColumn, .sourceRow, .targetColumn, .targetRow, .promotion:
+            confirmInput()
+        case .engineFailed:
+            retryEngine()
+        default:
+            break
         }
     }
 
-    private func playHapticsForEngineMove(_ absoluteMove: String) {
-        guard absoluteMove.count == 4 else { return }
-        let chars = Array(absoluteMove)
-        let absFromCol = colToNumber(String(chars[0]))
-        let absFromRow = Int(String(chars[1])) ?? 0
-        let absToCol = colToNumber(String(chars[2]))
-        let absToRow = Int(String(chars[3])) ?? 0
-
-        // Convert back to the PLAYER's own side before relaying via haptics.
-        let (fromCol, fromRow) = toAbsolute(col: absFromCol, row: absFromRow)
-        let (toCol, toRow) = toAbsolute(col: absToCol, row: absToRow)
-
-        HapticEngine.shared.playMove(fromCol: fromCol, fromRow: fromRow, toCol: toCol, toRow: toRow)
+    func handleShakeRepeat() {
+        guard phase != .selectSide, let move = Move(uci: lastEngineMove) else { return }
+        playHaptics(for: move, suffix: .none)
     }
 
-    /// A 180-degree board flip is its own inverse, so this single
-    /// function converts player-view <-> absolute in both directions.
-    /// White's own view already matches absolute, so it's a no-op for White.
-    private func toAbsolute(col: Int, row: Int) -> (Int, Int) {
-        guard playerColor == "BLACK" else { return (col, row) }
-        return (9 - col, 9 - row)
+    // MARK: - Setup / buttons
+
+    func selectColor(_ color: PieceColor) {
+        guard phase == .selectSide else { return }
+        resetGameState()
+        playerColor = color
+        if color == .white {
+            phase = .sourceColumn
+            status = "You are White. Enter the FROM column."
+            HapticEngine.shared.confirm()
+        } else {
+            // Black: the engine (White) moves first.
+            startEngineTurn(prefix: "You are Black. ")
+        }
     }
 
-    private func numberToCol(_ num: Int) -> String {
-        let cols = ["a","b","c","d","e","f","g","h"]
-        guard num >= 1 && num <= 8 else { return "a" }
-        return cols[num - 1]
+    func newGame() {
+        gameGeneration += 1
+        engineTask?.cancel()
+        engineTask = nil
+        EngineManager.shared.cancelSearch()
+        HapticEngine.shared.cancel()
+        resetGameState()
+        phase = .selectSide
+        status = "Choose your side."
     }
 
-    private func colToNumber(_ col: String) -> Int {
-        let cols = ["a","b","c","d","e","f","g","h"]
-        return (cols.firstIndex(of: col) ?? 0) + 1
+    func retryEngine() {
+        guard phase == .engineFailed else { return }
+        engineStatus = "Engine: retrying..."
+        startEngineTurn(prefix: "")
+    }
+
+    private func resetGameState() {
+        game = ChessGame()
+        lastMove = nil
+        selectedSquare = nil
+        legalTargets = []
+        promotionCandidates = []
+        lastEngineMove = ""
+        tapCount = 0
+    }
+
+    // MARK: - Move entry
+
+    private func confirmInput() {
+        let count = tapCount
+        tapCount = 0
+
+        if count == 0 {
+            if phase == .sourceColumn {
+                reject("Nothing entered. Tap volume up 1-8 times (1=a ... 8=h), then volume down.")
+            } else {
+                cancelMoveEntry("Move cancelled. Enter the FROM column again.")
+            }
+            return
+        }
+
+        switch phase {
+        case .sourceColumn:
+            guard count <= 8 else { reject("Columns are 1-8."); return }
+            sourceFile = count - 1
+            phase = .sourceRow
+            status = "From column \(Square.fileLetters[sourceFile]). Now the FROM row."
+            HapticEngine.shared.confirm()
+
+        case .sourceRow:
+            guard count <= 8 else { reject("Rows are 1-8."); return }
+            sourceRank = count - 1
+            let from = Square.index(file: sourceFile, rank: sourceRank)
+            let moves = game.legalMoves(from: from)
+            guard !moves.isEmpty else {
+                let name = Square.name(from)
+                if let piece = game.board[from] {
+                    let reason = piece.color == playerColor ? "that piece has no legal moves." : "that's the opponent's piece."
+                    cancelMoveEntry("\(name): \(reason) Start again.")
+                } else {
+                    cancelMoveEntry("\(name): no piece there. Start again.")
+                }
+                return
+            }
+            selectedSquare = from
+            legalTargets = Set(moves.map { $0.to })
+            phase = .targetColumn
+            status = "From \(Square.name(from)). Now the TO column."
+            HapticEngine.shared.confirm()
+
+        case .targetColumn:
+            guard count <= 8 else { reject("Columns are 1-8."); return }
+            targetFile = count - 1
+            phase = .targetRow
+            status = "To column \(Square.fileLetters[targetFile]). Now the TO row."
+            HapticEngine.shared.confirm()
+
+        case .targetRow:
+            guard count <= 8 else { reject("Rows are 1-8."); return }
+            let from = Square.index(file: sourceFile, rank: sourceRank)
+            let to = Square.index(file: targetFile, rank: count - 1)
+            let candidates = game.legalMoves(from: from).filter { $0.to == to }
+
+            // Legality check 1 of 2: is this move legal at all?
+            guard !candidates.isEmpty else {
+                cancelMoveEntry("Illegal move: \(Square.name(from)) to \(Square.name(to)). Start again.")
+                return
+            }
+            if candidates.count > 1 || candidates[0].promotion != nil {
+                promotionCandidates = candidates
+                phase = .promotion
+                status = "Promotion! Tap 1=Queen 2=Rook 3=Bishop 4=Knight, then volume down."
+                HapticEngine.shared.confirm()
+            } else {
+                commitPlayerMove(candidates[0])
+            }
+
+        case .promotion:
+            guard let piece = PieceType.fromPromotionCode(count),
+                  let move = promotionCandidates.first(where: { $0.promotion == piece }) else {
+                reject("Promotion choices are 1=Queen 2=Rook 3=Bishop 4=Knight.")
+                return
+            }
+            commitPlayerMove(move)
+
+        default:
+            break
+        }
+    }
+
+    /// Bad input for the current step: buzz, explain, stay on the same step.
+    private func reject(_ message: String) {
+        status = message
+        HapticEngine.shared.error()
+    }
+
+    /// Throw away the half-entered move and go back to the FROM column.
+    private func cancelMoveEntry(_ message: String) {
+        phase = .sourceColumn
+        selectedSquare = nil
+        legalTargets = []
+        promotionCandidates = []
+        tapCount = 0
+        status = message
+        HapticEngine.shared.error()
+    }
+
+    private func commitPlayerMove(_ move: Move) {
+        // Legality check 2 of 2: ChessGame.play() re-validates the move against
+        // freshly generated legal moves and confirms the mover's king isn't left
+        // in check. Nothing illegal can reach the board.
+        guard game.play(move) else {
+            cancelMoveEntry("That move was blocked as illegal (\(move.uci)). Start again.")
+            return
+        }
+        lastMove = move
+        selectedSquare = nil
+        legalTargets = []
+        promotionCandidates = []
+        HapticEngine.shared.confirm()
+
+        if let outcome = game.outcome {
+            finishGame(outcome)
+        } else {
+            startEngineTurn(prefix: "You played \(move.uci). ")
+        }
+    }
+
+    // MARK: - Engine turn
+
+    private func startEngineTurn(prefix: String) {
+        phase = .engineCalculating
+        tapCount = 0
+        status = prefix + "Engine is thinking..."
+
+        let generation = gameGeneration
+        engineTask?.cancel()
+        engineTask = Task { [weak self] in
+            await self?.runEngineTurn(generation: generation)
+        }
+    }
+
+    private func runEngineTurn(generation: Int) async {
+        let fen = game.fen
+        var chosen: Move?
+        var failure = ""
+
+        // Ask up to twice: the second try covers a one-off timeout or a bad reply.
+        for _ in 0..<2 {
+            let reply = await EngineManager.shared.bestMove(fen: fen)
+            guard generation == gameGeneration else { return } // a new game started meanwhile
+
+            guard let uci = reply else {
+                let reason = EngineManager.shared.lastError
+                failure = reason.isEmpty ? "Stockfish did not return a move." : reason
+                continue
+            }
+            // Never trust the engine blindly: the move must be legal in OUR position.
+            if let move = game.legalMove(uci: uci) {
+                chosen = move
+                break
+            }
+            failure = "Stockfish replied '\(uci)', which is not a legal move here."
+        }
+
+        guard generation == gameGeneration else { return }
+
+        guard let move = chosen, game.play(move) else {
+            phase = .engineFailed
+            engineStatus = "Engine: \(failure.isEmpty ? "unknown failure" : failure)"
+            status = "The engine could not move. Press volume down (or the Retry button) to try again."
+            HapticEngine.shared.error()
+            return
+        }
+
+        engineStatus = "Engine: Stockfish ready"
+        lastMove = move
+        lastEngineMove = move.uci
+
+        if let outcome = game.outcome {
+            status = "Engine played \(move.uci). \(outcome.summary)"
+            phase = .gameOver
+            playHaptics(for: move, suffix: .gameOver)
+            return
+        }
+
+        phase = .sourceColumn
+        if game.isInCheck {
+            status = "Engine played \(move.uci). CHECK! Your move: enter the FROM column."
+            playHaptics(for: move, suffix: .check)
+        } else {
+            status = "Engine played \(move.uci). Your move: enter the FROM column."
+            playHaptics(for: move, suffix: .none)
+        }
+    }
+
+    private func finishGame(_ outcome: GameOutcome) {
+        phase = .gameOver
+        selectedSquare = nil
+        legalTargets = []
+        status = "You played \(lastMove?.uci ?? ""). \(outcome.summary)"
+        HapticEngine.shared.playGameOver()
+    }
+
+    // MARK: - Haptic output
+
+    private func playHaptics(for move: Move, suffix: HapticEngine.Suffix) {
+        HapticEngine.shared.playMove(
+            fromFile: Square.file(move.from) + 1,
+            fromRank: Square.rank(move.from) + 1,
+            toFile: Square.file(move.to) + 1,
+            toRank: Square.rank(move.to) + 1,
+            promotion: move.promotion?.promotionCode ?? 0,
+            suffix: suffix
+        )
     }
 }

@@ -1,10 +1,8 @@
 import SwiftUI
 import MediaPlayer
-import CoreMotion
 
 struct ContentView: View {
     @StateObject private var vm = ChessPhoneViewModel()
-    private let motion = CMMotionManager()
 
     var body: some View {
         ZStack {
@@ -15,52 +13,99 @@ struct ContentView: View {
                 .position(x: -100, y: -100)
 
             if vm.phase == .selectSide {
-                HStack {
-                    Button("BLACK") { vm.selectColor("BLACK") }
-                        .padding().background(Color.black).foregroundColor(.white)
-                    Button("WHITE") { vm.selectColor("WHITE") }
-                        .padding().background(Color.white).foregroundColor(.black)
-                }
+                sideSelection
             } else {
-                VStack(spacing: 12) {
-                    Text("Phase: \(String(describing: vm.phase))")
-                    Text("Taps: \(vm.tapCount)")
-                    Text("Vol up = count, vol down = confirm, shake = repeat")
-                        .font(.caption)
-                        .multilineTextAlignment(.center)
-                    DebugBoardView(board: vm.board)
-                    Text("Debug board — always shown White-at-bottom, does not flip for Black")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding()
+                gameScreen
             }
         }
-        .onAppear {
-            VolumeButtonHandler.shared.onVolumeUp = { vm.handleVolumeUp() }
-            VolumeButtonHandler.shared.onVolumeDown = { vm.handleVolumeDown() }
-            VolumeButtonHandler.shared.start()
-            startShakeDetection()
-            Task { await EngineManager.shared.start() }
-        }
-        .onDisappear {
-            VolumeButtonHandler.shared.stop()
-            motion.stopAccelerometerUpdates()
+        .onAppear { vm.startInputs() }
+        .onDisappear { vm.stopInputs() }
+    }
+
+    // MARK: - Side selection
+
+    private var sideSelection: some View {
+        VStack(spacing: 24) {
+            Text("Choose your side")
+                .font(.title2.bold())
+            HStack(spacing: 20) {
+                Button("WHITE") { vm.selectColor(.white) }
+                    .padding(.horizontal, 28).padding(.vertical, 16)
+                    .background(Color.white)
+                    .foregroundColor(.black)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.black, lineWidth: 1))
+                Button("BLACK") { vm.selectColor(.black) }
+                    .padding(.horizontal, 28).padding(.vertical, 16)
+                    .background(Color.black)
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+            }
+            Text("White moves first. If you pick Black, the engine opens.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Text(vm.engineStatus)
+                .font(.caption)
+                .foregroundColor(vm.engineStatus.contains("FAILED") ? .red : .secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
         }
     }
 
-    private func startShakeDetection() {
-        guard motion.isAccelerometerAvailable else { return }
-        motion.accelerometerUpdateInterval = 0.1
-        motion.startAccelerometerUpdates(to: .main) { data, _ in
-            guard let d = data else { return }
-            let magnitude = sqrt(d.acceleration.x * d.acceleration.x +
-                                  d.acceleration.y * d.acceleration.y +
-                                  d.acceleration.z * d.acceleration.z)
-            if magnitude > 2.5 {
-                vm.handleShakeRepeat()
+    // MARK: - Game screen
+
+    private var gameScreen: some View {
+        ScrollView {
+            VStack(spacing: 10) {
+                HStack {
+                    Text("You: \(vm.playerColor.name)")
+                        .font(.subheadline.bold())
+                    Spacer()
+                    Button("New Game") { vm.newGame() }
+                        .font(.subheadline)
+                }
+                .padding(.horizontal)
+
+                BoardView(
+                    board: vm.game.board,
+                    bottomColor: vm.playerColor,
+                    lastMove: vm.lastMove,
+                    selected: vm.selectedSquare,
+                    targets: vm.legalTargets,
+                    checkSquare: vm.game.checkedKingSquare
+                )
+                .padding(.horizontal, 8)
+
+                Text(vm.status)
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+
+                VStack(spacing: 4) {
+                    Text(vm.phasePrompt)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Text("Taps: \(vm.tapCount)   (\(vm.inputPreview))")
+                        .font(.title3.monospacedDigit().bold())
+                }
+
+                if vm.phase == .engineFailed {
+                    Button("Retry engine") { vm.retryEngine() }
+                        .buttonStyle(.borderedProminent)
+                }
+
+                Text(vm.engineStatus)
+                    .font(.caption)
+                    .foregroundColor(vm.engineStatus.contains("FAILED") ? .red : .secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+
+                Text("Vol up = count, vol down = confirm (0 taps = cancel), shake = repeat engine move")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
             }
+            .padding(.vertical, 8)
         }
     }
 }

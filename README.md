@@ -28,26 +28,33 @@ machine when you run the build, they'll be included and bundled into
 the app. If you ever build on a different machine, redo steps 1-3
 there too.
 
-## Known unconfirmed bits (check if the build errors here)
-Two calls in EngineManager.swift are written against chesskit-engine's
-documented usage examples but weren't independently verified against
-its exact source:
-- `move.bestMove` in the `.bestmove` response case -- if this doesn't
-  compile, use Xcode's autocomplete on `move` to find the real
-  property name for the move string.
-- `.position(.startpos, moves: moves)` -- if this variant doesn't
-  exist, build a FEN string after each move instead and call
-  `.position(.fen(fen))`, which the library's README confirms exists.
+## How it plays
+- Pick WHITE or BLACK. White moves first, so if you pick Black the engine opens.
+- Enter a move as four numbers: FROM column, FROM row, TO column, TO row.
+  Columns 1-8 = a-h, rows 1-8. These are always real board coordinates
+  (a1 = 1,1; h8 = 8,8) whichever side you play; only the on-screen board flips.
+- Volume UP counts taps, Volume DOWN confirms the number. Confirming with 0 taps
+  cancels the move you're entering. Max 8 taps (4 for promotion).
+- Pawn promotion asks for a fifth number: 1=Queen 2=Rook 3=Bishop 4=Knight.
+- The engine's move is played back as haptics: from-col pulses, from-row pulses,
+  a success buzz, to-col pulses, to-row pulses (+ heavy pulses for promotion,
+  + two warning buzzes for check, + three heavy thumps for game over).
+  Shake repeats the last engine move.
+
+## Safety checks
+- The app has its own rules engine (ChessRules.swift). Your move is checked twice:
+  once when you finish entering it, and again inside `ChessGame.play()`, which
+  regenerates the legal moves and verifies your king isn't left in check.
+- The engine's reply is also verified against those legal moves before it is played.
+- Stockfish always receives the app's exact position as a FEN, so the two can't
+  drift out of sync.
+- At launch the app runs a test search; if Stockfish can't answer, the screen says
+  so (usually: NNUE files missing) instead of quietly playing a made-up move.
 
 ## What's still not implemented
-- Move legality / board-state validation. The app sends whatever
-  4-character move your taps produce straight to Stockfish; it
-  doesn't check it's a real legal move first. Stockfish will likely
-  just ignore or misbehave on an illegal move rather than crash, but
-  this isn't handled gracefully yet.
-- Game-over detection (checkmate, stalemate, draws).
-- Any visual board -- this stays screen-minimal by design, but there's
-  no way to double check the position visually if something goes wrong.
+- Undo / takebacks.
+- Skill levels (the engine always searches to depth 12).
+- Saving a game in progress.
 
 ## Building & installing
 Not a Builder project on its own (no builder.json) unless you've
