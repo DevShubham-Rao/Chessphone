@@ -35,6 +35,7 @@ final class ChessPhoneViewModel: ObservableObject {
     @Published private(set) var engineStatus: String = "Engine: starting..."
     @Published private(set) var lastEngineMove: String = ""
     @Published private(set) var recommendedMoveText: String = ""
+    @Published private(set) var hapticVisualStage: HapticEngine.VisualStage = .idle
 
     // Half-entered move (0-based file / rank)
     private var sourceFile = 0
@@ -53,6 +54,12 @@ final class ChessPhoneViewModel: ObservableObject {
     func startInputs() {
         guard !inputsRunning else { return }
         inputsRunning = true
+
+        // Mirror every haptic step on the board so the visual and physical
+        // instructions stay synchronized.
+        HapticEngine.shared.onVisualStage = { [weak self] stage in
+            self?.hapticVisualStage = stage
+        }
 
         VolumeButtonHandler.shared.onVolumeUp = { [weak self] in
             Task { @MainActor in self?.handleVolumeUp() }

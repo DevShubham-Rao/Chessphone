@@ -56,7 +56,8 @@ struct ContentView: View {
 
                 BoardView(board: vm.game.board, bottomColor: vm.playerColor,
                           lastMove: vm.lastMove, selected: vm.selectedSquare,
-                          targets: vm.legalTargets, checkSquare: vm.game.checkedKingSquare)
+                          targets: vm.legalTargets, checkSquare: vm.game.checkedKingSquare,
+                          hapticStage: vm.hapticVisualStage)
                     .padding(.horizontal, 8)
 
                 Text(vm.status).font(.headline).multilineTextAlignment(.center).padding(.horizontal)
@@ -138,8 +139,8 @@ private struct HapticSettingsView: View {
                     }
                 }
                 Section("Easy pattern") {
-                    Text("A strong buzz marks the start of each coordinate. Count the medium buzzes. Two strong buzzes separate FROM from TO.")
-                    Text("Easy mode deliberately uses longer pauses so each number is easier to count.")
+                    Text("LONG START → count the highlighted file → pause → count the highlighted rank → LONG SWITCH → count the destination file → pause → count the destination rank → TWO LONG DONE.")
+                    Text("The board highlights the same file or rank as each vibration. The current one is bright; completed ones stay lightly highlighted.")
                         .foregroundColor(.secondary)
                 }
                 Section {

@@ -14,6 +14,7 @@ struct BoardView: View {
     let selected: Int?
     let targets: Set<Int>
     let checkSquare: Int?
+    let hapticStage: HapticEngine.VisualStage
 
     private let lightSquare = Color(red: 0.94, green: 0.85, blue: 0.71)
     private let darkSquare = Color(red: 0.71, green: 0.53, blue: 0.39)
@@ -64,6 +65,11 @@ struct BoardView: View {
         ZStack {
             Rectangle().fill((file + rank) % 2 == 0 ? darkSquare : lightSquare)
 
+            // Visual mirror of the haptic counter:
+            // file counting sweeps a...h, rank counting sweeps 1...8.
+            // The current item is brighter; previous items remain lightly marked.
+            hapticOverlay(file: file, rank: rank, size: size)
+
             if let m = lastMove, index == m.from || index == m.to {
                 Rectangle().fill(Color.yellow.opacity(0.35))
             }
@@ -83,6 +89,65 @@ struct BoardView: View {
             }
         }
         .frame(width: size, height: size)
+    }
+
+    @ViewBuilder
+    private func hapticOverlay(file: Int, rank: Int, size: CGFloat) -> some View {
+        let state = hapticStateFor(file: file, rank: rank)
+        switch state {
+        case .none:
+            EmptyView()
+        case .past:
+            Rectangle()
+                .fill(Color.blue.opacity(0.18))
+                .overlay(Rectangle().stroke(Color.blue.opacity(0.35), lineWidth: 1))
+        case .current:
+            Rectangle()
+                .fill(Color.blue.opacity(0.52))
+                .overlay(Rectangle().stroke(Color.white, lineWidth: 3))
+        case .switchMarker:
+            Rectangle()
+                .fill(Color.orange.opacity(0.45))
+                .overlay(Rectangle().stroke(Color.white, lineWidth: 3))
+        case .done:
+            Rectangle()
+                .fill(Color.green.opacity(0.45))
+                .overlay(Rectangle().stroke(Color.white, lineWidth: 3))
+        }
+    }
+
+    private enum HapticCellState { case none, past, current, switchMarker, done }
+
+    private func hapticStateFor(file: Int, rank: Int) -> HapticCellState {
+        switch hapticStage {
+        case .idle:
+            return .none
+        case .fromFile(let n):
+            guard n > 0 else { return .none }
+            if file < n - 1 { return .past }
+            if file == n - 1 { return .current }
+            return .none
+        case .fromRank(let n):
+            guard n > 0 else { return .none }
+            if rank < n - 1 { return .past }
+            if rank == n - 1 { return .current }
+            return .none
+        case .switchMarker:
+            // Flash the entire board while the long SWITCH vibration plays.
+            return .switchMarker
+        case .toFile(let n):
+            guard n > 0 else { return .none }
+            if file < n - 1 { return .past }
+            if file == n - 1 { return .current }
+            return .none
+        case .toRank(let n):
+            guard n > 0 else { return .none }
+            if rank < n - 1 { return .past }
+            if rank == n - 1 { return .current }
+            return .none
+        case .done:
+            return .done
+        }
     }
 
     private func pieceView(_ piece: Piece, size: CGFloat) -> some View {
