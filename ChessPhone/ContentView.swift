@@ -93,6 +93,8 @@ struct ContentView: View {
 private struct HapticSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var clarity = HapticEngine.shared.clarity
+    @State private var pulseGap = HapticEngine.shared.customPulseGap
+    @State private var pulseGapText = String(format: "%.2f", HapticEngine.shared.customPulseGap)
 
     var body: some View {
         NavigationStack {
@@ -107,6 +109,33 @@ private struct HapticSettingsView: View {
                         HapticEngine.shared.setClarity(newValue)
                     }
                     Button("Test vibration pattern") { HapticEngine.shared.testPattern() }
+                }
+                Section("Pulse speed") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Seconds between pulses")
+                            Spacer()
+                            TextField("0.80", text: $pulseGapText)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 75)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit { savePulseGap() }
+                        }
+                        Slider(value: $pulseGap, in: 0.10...5.00, step: 0.05)
+                            .onChange(of: pulseGap) { newValue in
+                                pulseGapText = String(format: "%.2f", newValue)
+                                HapticEngine.shared.customPulseGap = newValue
+                            }
+                        HStack {
+                            Text("0.10 = fastest").font(.caption).foregroundColor(.secondary)
+                            Spacer()
+                            Text("5.00 = slowest").font(.caption).foregroundColor(.secondary)
+                        }
+                        Text("Set this much higher if you need more time to count each vibration. Example: 2.00 means two seconds between pulses.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 Section("Easy pattern") {
                     Text("A strong buzz marks the start of each coordinate. Count the medium buzzes. Two strong buzzes separate FROM from TO.")
@@ -125,6 +154,18 @@ private struct HapticSettingsView: View {
                 }
             }
         }
+    }
+
+    private func savePulseGap() {
+        let cleaned = pulseGapText.replacingOccurrences(of: ",", with: ".")
+        guard let value = Double(cleaned) else {
+            pulseGapText = String(format: "%.2f", pulseGap)
+            return
+        }
+        let clamped = min(max(value, 0.10), 5.00)
+        pulseGap = clamped
+        pulseGapText = String(format: "%.2f", clamped)
+        HapticEngine.shared.customPulseGap = clamped
     }
 }
 

@@ -57,6 +57,18 @@ final class HapticEngine {
     private var playback: Task<Void, Never>?
 
     private let clarityKey = "hapticClarity"
+    private let customGapKey = "hapticCustomGap"
+
+    /// Time between counted pulses, in seconds. This is user-adjustable and persisted.
+    var customPulseGap: Double {
+        get {
+            let value = UserDefaults.standard.double(forKey: customGapKey)
+            return value > 0 ? min(max(value, 0.10), 5.00) : 0.80
+        }
+        set {
+            UserDefaults.standard.set(min(max(newValue, 0.10), 5.00), forKey: customGapKey)
+        }
+    }
 
     var clarity: Clarity {
         get {
@@ -104,6 +116,7 @@ final class HapticEngine {
                   promotion: Int = 0, suffix: Suffix = .none) {
         cancel()
         let clarity = self.clarity
+        let pulseGap = self.customPulseGap
 
         playback = Task { [weak self] in
             guard let self = self else { return }
@@ -113,9 +126,9 @@ final class HapticEngine {
             await self.pause(clarity.movePause)
 
             // FROM coordinate
-            await self.coordinate(fromFile, clarity: clarity)
-            await self.pause(clarity.coordinatePause)
-            await self.coordinate(fromRank, clarity: clarity)
+            await self.coordinate(fromFile, clarity: clarity, pulseGap: pulseGap)
+            await self.pause(max(clarity.coordinatePause, pulseGap * 1.5))
+            await self.coordinate(fromRank, clarity: clarity, pulseGap: pulseGap)
 
             // Two heavy buzzes = FROM is complete.
             await self.pause(clarity.movePause)
@@ -126,9 +139,9 @@ final class HapticEngine {
             await self.pause(clarity.movePause)
 
             // TO coordinate
-            await self.coordinate(toFile, clarity: clarity)
-            await self.pause(clarity.coordinatePause)
-            await self.coordinate(toRank, clarity: clarity)
+            await self.coordinate(toFile, clarity: clarity, pulseGap: pulseGap)
+            await self.pause(max(clarity.coordinatePause, pulseGap * 1.5))
+            await self.coordinate(toRank, clarity: clarity, pulseGap: pulseGap)
 
             if promotion > 0 {
                 await self.pause(clarity.movePause)
@@ -150,12 +163,12 @@ final class HapticEngine {
         }
     }
 
-    private func coordinate(_ count: Int, clarity: Clarity) async {
+    private func coordinate(_ count: Int, clarity: Clarity, pulseGap: Double) async {
         // A heavy marker before every coordinate tells the user where counting starts.
         if Task.isCancelled { return }
         heavy.impactOccurred()
-        await pause(0.28)
-        await pulses(count, gap: clarity.pulseGap)
+        await pause(min(max(pulseGap * 0.45, 0.20), 1.25))
+        await pulses(count, gap: pulseGap)
     }
 
     func playGameOver() {
