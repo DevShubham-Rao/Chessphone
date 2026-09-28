@@ -3,11 +3,17 @@ options:
   bundleIdPrefix: com.buildertest
   deploymentTarget:
     iOS: "16.0"
+packages:
+  ChessKitEngine:
+    url: https://github.com/chesskit-app/chesskit-engine
+    from: 0.2.0
 targets:
   ChessPhone:
     type: application
     platform: iOS
-    sources: [ChessPhone]
+    sources: [ChessPhone, Resources]
+    dependencies:
+      - package: ChessKitEngine
     info:
       path: ChessPhone/Info.plist
       properties:

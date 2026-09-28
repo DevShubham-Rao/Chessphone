@@ -37,6 +37,7 @@ struct ContentView: View {
             VolumeButtonHandler.shared.onVolumeDown = { vm.handleVolumeDown() }
             VolumeButtonHandler.shared.start()
             startShakeDetection()
+            Task { await EngineManager.shared.start() }
         }
         .onDisappear {
             VolumeButtonHandler.shared.stop()

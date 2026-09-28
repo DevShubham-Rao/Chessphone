@@ -19,7 +19,7 @@ class ChessPhoneViewModel: ObservableObject {
     private var targetCol = 0
     private var targetRow = 0
 
-    private var currentFEN = "start"
+    private var moveHistory: [String] = []
     private var lastEngineMove = ""
 
     func handleVolumeUp() {
@@ -68,14 +68,14 @@ class ChessPhoneViewModel: ObservableObject {
     }
 
     private func sendMoveToEngine(_ move: String) {
-        let fen = currentFEN
-        Task.detached(priority: .userInitiated) {
-            let reply = StubEngine.bestMove(forFEN: fen)
-            await MainActor.run {
-                self.lastEngineMove = reply
-                self.playHapticsForEngineMove(reply)
-                self.phase = .sourceColumn
-            }
+        moveHistory.append(move)
+        Task {
+            await EngineManager.shared.start()
+            let reply = await EngineManager.shared.bestMove(forMoveHistory: moveHistory) ?? "e7e5"
+            moveHistory.append(reply)
+            self.lastEngineMove = reply
+            self.playHapticsForEngineMove(reply)
+            self.phase = .sourceColumn
         }
     }
 
