@@ -1,0 +1,18 @@
+{
+  "project": "builder signing setup --distribution development --devices-from-mobai",
+  "platform": "ios",
+  "github": {
+    "owner": "DevShubham-Rao",
+    "repo": "Chessphone"
+  },
+  "provider": "github",
+  "codemagic": {},
+  "bitrise": {},
+  "ios": {},
+  "flutter": {
+    "watch": {}
+  },
+  "reactNative": {},
+  "kmp": {},
+  "mobai": {}
+}
