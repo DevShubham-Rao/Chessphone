@@ -1,0 +1,29 @@
+name: ChessPhone
+options:
+  bundleIdPrefix: com.buildertest
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  ChessPhone:
+    type: application
+    platform: iOS
+    sources: [ChessPhone]
+    info:
+      path: ChessPhone/Info.plist
+      properties:
+        CFBundleDisplayName: ChessPhone
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresPersistentWiFi: false
+        UIBackgroundModes: []
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.buildertest.chessphone
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+    schemes:
+      ChessPhone:
+        build:
+          targets:
+            ChessPhone: all
