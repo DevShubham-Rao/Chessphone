@@ -22,14 +22,19 @@ struct ContentView: View {
                         .padding().background(Color.white).foregroundColor(.black)
                 }
             } else {
-                VStack {
+                VStack(spacing: 12) {
                     Text("Phase: \(String(describing: vm.phase))")
                     Text("Taps: \(vm.tapCount)")
                     Text("Vol up = count, vol down = confirm, shake = repeat")
                         .font(.caption)
                         .multilineTextAlignment(.center)
-                        .padding()
+                    DebugBoardView(board: vm.board)
+                    Text("Debug board — always shown White-at-bottom, does not flip for Black")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
                 }
+                .padding()
             }
         }
         .onAppear {
