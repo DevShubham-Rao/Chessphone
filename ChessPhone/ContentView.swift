@@ -54,7 +54,9 @@ struct ContentView: View {
                     Button("New Game") { vm.newGame() }.font(.subheadline)
                 }.padding(.horizontal)
 
-                BoardView(board: vm.game.board, bottomColor: vm.playerColor,
+                // Always draw the board from White's side (a-h left to right, rank 1 at the bottom),
+                // even when playing Black, so it matches the numbers you enter.
+                BoardView(board: vm.game.board, bottomColor: .white,
                           lastMove: vm.lastMove, selected: vm.selectedSquare,
                           targets: vm.legalTargets, checkSquare: vm.game.checkedKingSquare,
                           hapticStage: vm.hapticVisualStage)
