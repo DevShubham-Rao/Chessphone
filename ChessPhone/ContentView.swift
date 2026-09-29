@@ -30,7 +30,7 @@ struct ContentView: View {
                     .padding(.horizontal, 28).padding(.vertical, 16)
                     .background(Color.black).foregroundColor(.white).cornerRadius(8)
             }
-            Text("White: the engine recommends your move with vibration. You then enter your opponent's move.")
+            Text("The engine tells you your moves with vibration. You only enter your opponent's moves. White: the engine recommends your first move right away. Black: enter White's first move, then the engine recommends your reply.")
                 .font(.caption).foregroundColor(.secondary).multilineTextAlignment(.center).padding(.horizontal)
             Button { showingSettings = true } label: {
                 Label("Vibration Settings", systemImage: "iphone.radiowaves.left.and.right")

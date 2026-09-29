@@ -29,17 +29,21 @@ the app. If you ever build on a different machine, redo steps 1-3
 there too.
 
 ## How it plays
-- Pick WHITE or BLACK. White moves first, so if you pick Black the engine opens.
-- Enter a move as four numbers: FROM column, FROM row, TO column, TO row.
+- Pick WHITE or BLACK. The engine always advises YOU; you only type in your opponent's moves.
+  - White: the engine recommends your first move right away (haptics + text). You play it on
+    your real board, then enter your opponent's reply.
+  - Black: nothing is played automatically. Enter White's first move, then the engine
+    recommends your reply.
+- Enter the opponent's move as four numbers: FROM column, FROM row, TO column, TO row.
   Columns 1-8 = a-h, rows 1-8. These are always real board coordinates
   (a1 = 1,1; h8 = 8,8) whichever side you play; only the on-screen board flips.
-- Volume UP counts taps, Volume DOWN confirms the number. Confirming with 0 taps
-  cancels the move you're entering. Max 8 taps (4 for promotion).
+- Volume UP counts taps, Volume DOWN confirms the number and moves to the next step.
+  Confirming with 0 taps cancels the move you're entering. Max 8 taps (4 for promotion).
 - Pawn promotion asks for a fifth number: 1=Queen 2=Rook 3=Bishop 4=Knight.
 - The engine's move is played back as haptics: from-col pulses, from-row pulses,
   a success buzz, to-col pulses, to-row pulses (+ heavy pulses for promotion,
   + two warning buzzes for check, + three heavy thumps for game over).
-  Shake repeats the last engine move.
+  Shake repeats the last recommended move.
 
 ## Safety checks
 - The app has its own rules engine (ChessRules.swift). Your move is checked twice:
