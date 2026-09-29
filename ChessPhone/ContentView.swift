@@ -4,6 +4,7 @@ import MediaPlayer
 struct ContentView: View {
     @StateObject private var vm = ChessPhoneViewModel()
     @State private var showingSettings = false
+    @State private var showingPractice = false
 
     var body: some View {
         ZStack {
@@ -16,6 +17,7 @@ struct ContentView: View {
         .onAppear { vm.startInputs() }
         .onDisappear { vm.stopInputs() }
         .sheet(isPresented: $showingSettings) { HapticSettingsView() }
+        .fullScreenCover(isPresented: $showingPractice) { PracticeView() }
     }
 
     private var sideSelection: some View {
@@ -33,7 +35,10 @@ struct ContentView: View {
             Text("The engine tells you your moves with vibration. You only enter your opponent's moves. White: the engine recommends your first move right away. Black: enter White's first move, then the engine recommends your reply.")
                 .font(.caption).foregroundColor(.secondary).multilineTextAlignment(.center).padding(.horizontal)
             Button { showingSettings = true } label: {
-                Label("Vibration Settings", systemImage: "iphone.radiowaves.left.and.right")
+                Label("Vibration & Audio Settings", systemImage: "iphone.radiowaves.left.and.right")
+            }.buttonStyle(.bordered)
+            Button { showingPractice = true } label: {
+                Label("Practice vibrations", systemImage: "graduationcap")
             }.buttonStyle(.bordered)
             Text(vm.engineStatus)
                 .font(.caption)
@@ -50,7 +55,7 @@ struct ContentView: View {
                     Spacer()
                     Button { showingSettings = true } label: {
                         Image(systemName: "gearshape")
-                    }.accessibilityLabel("Vibration Settings")
+                    }.accessibilityLabel("Vibration and Audio Settings")
                     Button("New Game") { vm.newGame() }.font(.subheadline)
                 }.padding(.horizontal)
 
@@ -90,85 +95,6 @@ struct ContentView: View {
                     .multilineTextAlignment(.center).padding(.horizontal)
             }.padding(.vertical, 8)
         }
-    }
-}
-
-private struct HapticSettingsView: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var clarity = HapticEngine.shared.clarity
-    @State private var pulseGap = HapticEngine.shared.customPulseGap
-    @State private var pulseGapText = String(format: "%.2f", HapticEngine.shared.customPulseGap)
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Move vibration") {
-                    Picker("Clarity", selection: $clarity) {
-                        ForEach(HapticEngine.Clarity.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
-                        }
-                    }.pickerStyle(.segmented)
-                    .onChange(of: clarity) { newValue in
-                        HapticEngine.shared.setClarity(newValue)
-                    }
-                    Button("Test vibration pattern") { HapticEngine.shared.testPattern() }
-                }
-                Section("Pulse speed") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Seconds between pulses")
-                            Spacer()
-                            TextField("0.80", text: $pulseGapText)
-                                .keyboardType(.decimalPad)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 75)
-                                .textFieldStyle(.roundedBorder)
-                                .onSubmit { savePulseGap() }
-                        }
-                        Slider(value: $pulseGap, in: 0.10...5.00, step: 0.05)
-                            .onChange(of: pulseGap) { newValue in
-                                pulseGapText = String(format: "%.2f", newValue)
-                                HapticEngine.shared.customPulseGap = newValue
-                            }
-                        HStack {
-                            Text("0.10 = fastest").font(.caption).foregroundColor(.secondary)
-                            Spacer()
-                            Text("5.00 = slowest").font(.caption).foregroundColor(.secondary)
-                        }
-                        Text("Set this much higher if you need more time to count each vibration. Example: 2.00 means two seconds between pulses.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                Section("Easy pattern") {
-                    Text("LONG START → count the highlighted file → pause → count the highlighted rank → LONG SWITCH → count the destination file → pause → count the destination rank → TWO LONG DONE.")
-                    Text("The board highlights the same file or rank as each vibration. The current one is bright; completed ones stay lightly highlighted.")
-                        .foregroundColor(.secondary)
-                }
-                Section {
-                    Text("Recommended: Easy").font(.headline)
-                    Text("Use Fast only after you are comfortable reading the pattern.").foregroundColor(.secondary)
-                }
-            }
-            .navigationTitle("Vibration Settings")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { HapticEngine.shared.cancel(); dismiss() }
-                }
-            }
-        }
-    }
-
-    private func savePulseGap() {
-        let cleaned = pulseGapText.replacingOccurrences(of: ",", with: ".")
-        guard let value = Double(cleaned) else {
-            pulseGapText = String(format: "%.2f", pulseGap)
-            return
-        }
-        let clamped = min(max(value, 0.10), 5.00)
-        pulseGap = clamped
-        pulseGapText = String(format: "%.2f", clamped)
-        HapticEngine.shared.customPulseGap = clamped
     }
 }
 

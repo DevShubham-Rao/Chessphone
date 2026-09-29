@@ -30,6 +30,9 @@ final class VolumeButtonHandler: NSObject {
         guard !isObserving else { return }
 
         do {
+            // .playback so spoken moves are audible even with the silent switch on;
+            // .mixWithOthers so it doesn't stop the user's music.
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try session.setActive(true)
         } catch {
             print("ChessPhone: could not activate audio session: \(error)")

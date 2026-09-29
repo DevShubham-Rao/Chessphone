@@ -50,6 +50,8 @@ final class ChessPhoneViewModel: ObservableObject {
     private var gameGeneration = 0
     private let shake = ShakeDetector()
     private var inputsRunning = false
+    /// What was last announced out loud, so shaking the phone can repeat it.
+    private var lastSpokenText = ""
 
     // MARK: - Lifecycle
 
@@ -156,7 +158,7 @@ final class ChessPhoneViewModel: ObservableObject {
 
     func handleShakeRepeat() {
         guard phase != .selectSide, !lastEngineMove.isEmpty, let move = Move(uci: lastEngineMove) else { return }
-        playHaptics(for: move, suffix: .none)
+        deliver(move: move, suffix: .none, spoken: lastSpokenText)
     }
 
     // MARK: - Setup / buttons
@@ -181,6 +183,7 @@ final class ChessPhoneViewModel: ObservableObject {
         engineTask = nil
         EngineManager.shared.cancelSearch()
         HapticEngine.shared.cancel()
+        SpeechEngine.shared.stop()
         resetGameState()
         phase = .selectSide
         status = "Choose your side."
@@ -199,6 +202,7 @@ final class ChessPhoneViewModel: ObservableObject {
         legalTargets = []
         promotionCandidates = []
         lastEngineMove = ""
+        lastSpokenText = ""
         recommendedMoveText = ""
         tapCount = 0
     }
@@ -251,6 +255,11 @@ final class ChessPhoneViewModel: ObservableObject {
 
         guard generation == gameGeneration else { return }
 
+        // Remember what is moving / being captured BEFORE the move changes the board
+        // (used for the spoken version of the move).
+        let mover = chosen.flatMap { game.board[$0.from]?.type }
+        let captured = chosen.flatMap { capturedPiece(for: $0) }
+
         guard let move = chosen, game.play(move) else {
             phase = .engineFailed
             engineStatus = "Engine: \(failure.isEmpty ? "unknown failure" : failure)"
@@ -267,13 +276,13 @@ final class ChessPhoneViewModel: ObservableObject {
         if let outcome = game.outcome {
             status = "Your recommended move ends the game. \(outcome.summary)"
             phase = .gameOver
-            playHaptics(for: move, suffix: .gameOver)
+            announce(move, suffix: .gameOver, piece: mover, captured: captured)
             return
         }
 
         phase = .opponentSourceColumn
         status = "Play \(move.uci) as \(playerColor.name). Then enter your opponent's move."
-        playHaptics(for: move, suffix: game.isInCheck ? .check : .none)
+        announce(move, suffix: game.isInCheck ? .check : .none, piece: mover, captured: captured)
     }
 
     private func confirmInput() {
@@ -386,19 +395,68 @@ final class ChessPhoneViewModel: ObservableObject {
         selectedSquare = nil
         legalTargets = []
         status = "Opponent played \(lastMove?.uci ?? ""). \(outcome.summary)"
-        HapticEngine.shared.playGameOver()
+        let speech = SpeechEngine.shared
+        if speech.enabled && speech.timing == .audioOnly {
+            HapticEngine.shared.cancel()
+        } else {
+            HapticEngine.shared.playGameOver()
+        }
+        if speech.enabled { speech.speak(outcome.summary) }
     }
 
-    // MARK: - Haptic output
+    // MARK: - Haptic + audio output
 
-    private func playHaptics(for move: Move, suffix: HapticEngine.Suffix) {
+    /// The piece that gets captured by `move` (including en passant). Call BEFORE playing the move.
+    private func capturedPiece(for move: Move) -> PieceType? {
+        if let target = game.board[move.to] { return target.type }
+        if game.board[move.from]?.type == .pawn, Square.file(move.from) != Square.file(move.to) {
+            return .pawn   // en passant
+        }
+        return nil
+    }
+
+    /// Builds the spoken text for a freshly played engine move, remembers it (for shake-to-repeat),
+    /// and delivers it as vibration and/or speech according to the audio settings.
+    private func announce(_ move: Move, suffix: HapticEngine.Suffix, piece: PieceType?, captured: PieceType?) {
+        let text = SpeechEngine.shared.phrase(for: move, piece: piece, captured: captured,
+                                              suffix: suffix, outcome: game.outcome)
+        lastSpokenText = text
+        deliver(move: move, suffix: suffix, spoken: text)
+    }
+
+    private func deliver(move: Move, suffix: HapticEngine.Suffix, spoken: String) {
+        let speech = SpeechEngine.shared
+        speech.stop()
+
+        guard speech.enabled else {
+            playHaptics(for: move, suffix: suffix)
+            return
+        }
+
+        switch speech.timing {
+        case .together:
+            playHaptics(for: move, suffix: suffix)
+            speech.speak(spoken)
+        case .afterVibration:
+            playHaptics(for: move, suffix: suffix) {
+                SpeechEngine.shared.speak(spoken)
+            }
+        case .audioOnly:
+            HapticEngine.shared.cancel()
+            speech.speak(spoken)
+        }
+    }
+
+    private func playHaptics(for move: Move, suffix: HapticEngine.Suffix,
+                             onFinished: (@MainActor () -> Void)? = nil) {
         HapticEngine.shared.playMove(
             fromFile: Square.file(move.from) + 1,
             fromRank: Square.rank(move.from) + 1,
             toFile: Square.file(move.to) + 1,
             toRank: Square.rank(move.to) + 1,
             promotion: move.promotion?.promotionCode ?? 0,
-            suffix: suffix
+            suffix: suffix,
+            onFinished: onFinished
         )
     }
 }

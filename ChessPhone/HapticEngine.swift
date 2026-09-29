@@ -1,9 +1,9 @@
 import UIKit
+import CoreHaptics
 
-/// Clear, countable chess haptics.
-/// Move format:
-/// LONG START -> count FROM file -> pause -> count FROM rank
-/// -> LONG SWITCH -> count TO file -> pause -> count TO rank -> LONG LONG DONE.
+/// Plays a move as vibration, following the user's editable `HapticPattern`
+/// (see Vibration Settings). The pattern is a list of steps - pauses, long buzzes
+/// and counted pulses - each with its own timing.
 ///
 /// Every counted pulse also reports visual progress so the board can mirror
 /// exactly what the haptics are doing.
@@ -27,136 +27,92 @@ final class HapticEngine {
         case done
     }
 
-    enum Clarity: String, CaseIterable, Identifiable {
-        case easy = "Easy"
-        case fast = "Fast"
-        var id: String { rawValue }
-
-        var coordinatePause: Double {
-            switch self {
-            case .easy: return 0.90
-            case .fast: return 0.42
-            }
-        }
-
-        var markerPause: Double {
-            switch self {
-            case .easy: return 1.10
-            case .fast: return 0.55
-            }
-        }
-    }
-
     private let impact = UIImpactFeedbackGenerator(style: .medium)
     private let heavy = UIImpactFeedbackGenerator(style: .heavy)
     private let notify = UINotificationFeedbackGenerator()
     private var playback: Task<Void, Never>?
 
-    private let clarityKey = "hapticClarity"
-    private let customGapKey = "hapticCustomGap"
+    // Core Haptics is used for buzzes with a real length (e.g. "vibrate for 0.1 s").
+    private let supportsCoreHaptics = CHHapticEngine.capabilitiesForHardware().supportsHaptics
+    private var core: CHHapticEngine?
+    private var activePlayer: CHHapticPatternPlayer?
 
-    /// Seconds between counted pulses. Persisted and adjustable from 0.10 to 5.00.
-    var customPulseGap: Double {
-        get {
-            let value = UserDefaults.standard.double(forKey: customGapKey)
-            return value > 0 ? min(max(value, 0.10), 5.00) : 0.80
-        }
-        set {
-            UserDefaults.standard.set(min(max(newValue, 0.10), 5.00), forKey: customGapKey)
-        }
-    }
-
-    var clarity: Clarity {
-        get { Clarity(rawValue: UserDefaults.standard.string(forKey: clarityKey) ?? "") ?? .easy }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: clarityKey) }
+    /// The sequence that gets played. Saved automatically whenever it changes.
+    var pattern: HapticPattern {
+        didSet { pattern.save() }
     }
 
     /// Called on the main actor whenever the haptic sequence changes stage.
     var onVisualStage: ((VisualStage) -> Void)?
 
-    func setClarity(_ value: Clarity) { clarity = value }
+    private init() {
+        pattern = HapticPattern.load()
+    }
 
     func tick() { impact.impactOccurred() }
     func confirm() { notify.notificationOccurred(.success) }
     func error() { notify.notificationOccurred(.error) }
 
-    func testPattern() {
-        cancel()
-        playback = Task { [weak self] in
-            guard let self else { return }
-            self.emit(.fromFile(1))
-            self.heavy.impactOccurred()
-            await self.pause(self.clarity.markerPause)
-            self.emit(.fromFile(2))
-            self.impact.impactOccurred()
-            await self.pause(self.customPulseGap)
-            self.emit(.fromFile(3))
-            self.impact.impactOccurred()
-            await self.pause(self.clarity.coordinatePause)
-            self.emit(.switchMarker)
-            self.heavy.impactOccurred()
-            await self.pause(self.clarity.markerPause)
-            self.emit(.toFile(1))
-            self.impact.impactOccurred()
-            await self.pause(self.customPulseGap)
-            self.emit(.toFile(2))
-            self.impact.impactOccurred()
-            await self.pause(self.clarity.coordinatePause)
-            self.emit(.done)
-            self.heavy.impactOccurred()
-            await self.pause(0.18)
-            self.heavy.impactOccurred()
-            await self.pause(self.clarity.markerPause)
-            self.emit(.idle)
-        }
+    /// Plays e2 -> e4 (5,2 -> 5,4), optionally with a promotion signal.
+    func testPattern(withPromotion: Bool = false) {
+        playMove(fromFile: 5, fromRank: 2, toFile: 5, toRank: 4,
+                 promotion: withPromotion ? 1 : 0, suffix: .none)
     }
 
     func playMove(fromFile: Int, fromRank: Int, toFile: Int, toRank: Int,
-                  promotion: Int = 0, suffix: Suffix = .none) {
+                  promotion: Int = 0, suffix: Suffix = .none,
+                  onFinished: (@MainActor () -> Void)? = nil) {
         cancel()
-        let clarity = self.clarity
-        let gap = self.customPulseGap
+        let steps = pattern.steps
 
         playback = Task { [weak self] in
             guard let self else { return }
 
-            // 1. LONG = START
-            self.emit(.fromFile(0))
-            self.heavy.impactOccurred()
-            await self.pause(clarity.markerPause)
+            // A pause that follows a skipped step (e.g. promotion on a normal move)
+            // is skipped too, so there is no dead air at the end.
+            var skipNextWait = false
 
-            // 2. Short/count pulses for FROM file.
-            await self.coordinate(count: fromFile, stage: { .fromFile($0) }, gap: gap)
-            await self.pause(clarity.coordinatePause)
+            for step in steps {
+                if Task.isCancelled { return }
 
-            // Short/count pulses for FROM rank.
-            await self.coordinate(count: fromRank, stage: { .fromRank($0) }, gap: gap)
-            await self.pause(clarity.markerPause)
+                if step.kind == .wait {
+                    if skipNextWait {
+                        skipNextWait = false
+                    } else {
+                        await self.pause(step.seconds)
+                    }
+                    continue
+                }
+                skipNextWait = false
 
-            // 3. LONG = SWITCH
-            self.emit(.switchMarker)
-            self.heavy.impactOccurred()
-            await self.pause(clarity.markerPause)
-
-            // Destination file.
-            await self.coordinate(count: toFile, stage: { .toFile($0) }, gap: gap)
-            await self.pause(clarity.coordinatePause)
-
-            // Destination rank.
-            await self.coordinate(count: toRank, stage: { .toRank($0) }, gap: gap)
-
-            if promotion > 0 {
-                await self.pause(clarity.markerPause)
-                await self.pulses(promotion, generator: self.heavy, gap: gap)
+                switch step.kind {
+                case .wait:
+                    break
+                case .startBuzz:
+                    self.emit(.fromFile(0))
+                    await self.vibrate(length: step.seconds, intensity: step.intensity)
+                case .switchBuzz:
+                    self.emit(.switchMarker)
+                    await self.vibrate(length: step.seconds, intensity: step.intensity)
+                case .doneBuzz:
+                    self.emit(.done)
+                    await self.vibrate(length: step.seconds, intensity: step.intensity)
+                case .buzz:
+                    await self.vibrate(length: step.seconds, intensity: step.intensity)
+                case .fromFile:
+                    if fromFile > 0 { await self.counted(fromFile, step, { .fromFile($0) }) } else { skipNextWait = true }
+                case .fromRank:
+                    if fromRank > 0 { await self.counted(fromRank, step, { .fromRank($0) }) } else { skipNextWait = true }
+                case .toFile:
+                    if toFile > 0 { await self.counted(toFile, step, { .toFile($0) }) } else { skipNextWait = true }
+                case .toRank:
+                    if toRank > 0 { await self.counted(toRank, step, { .toRank($0) }) } else { skipNextWait = true }
+                case .promotion:
+                    if promotion > 0 { await self.counted(promotion, step, { _ in .idle }) } else { skipNextWait = true }
+                }
             }
 
-            await self.pause(clarity.markerPause)
-
-            // 5. TWO LONG = DONE
-            self.emit(.done)
-            self.heavy.impactOccurred()
-            await self.pause(0.22)
-            self.heavy.impactOccurred()
+            if Task.isCancelled { return }
 
             switch suffix {
             case .none: break
@@ -171,17 +127,9 @@ final class HapticEngine {
             }
 
             await self.pause(0.35)
-            self.emit(.idle)
-        }
-    }
-
-    private func coordinate(count: Int, stage: (Int) -> VisualStage, gap: Double) async {
-        guard count > 0 else { return }
-        for number in 1...count {
             if Task.isCancelled { return }
-            emit(stage(number))
-            impact.impactOccurred()
-            await pause(gap)
+            self.emit(.idle)
+            onFinished?()
         }
     }
 
@@ -196,7 +144,84 @@ final class HapticEngine {
     func cancel() {
         playback?.cancel()
         playback = nil
+        try? activePlayer?.stop(atTime: CHHapticTimeImmediate)
+        activePlayer = nil
         emit(.idle)
+    }
+
+    // MARK: - Building blocks
+
+    /// `n` pulses of one step. `seconds` on the step is the silence between pulses.
+    private func counted(_ n: Int, _ step: PatternStep, _ stage: (Int) -> VisualStage) async {
+        guard n > 0 else { return }
+        for i in 1...n {
+            if Task.isCancelled { return }
+            let s = stage(i)
+            if s != .idle { emit(s) }
+            await vibrate(length: step.pulseLength, intensity: step.intensity)
+            if i < n { await pause(step.seconds) }
+        }
+    }
+
+    /// One vibration. Lengths under ~0.05 s are a tap; longer ones are a continuous buzz.
+    /// Returns when the vibration has finished.
+    private func vibrate(length: Double, intensity: Double) async {
+        let level = Float(min(max(intensity, 0.1), 1.0))
+
+        if length < 0.05 {
+            impact.impactOccurred(intensity: CGFloat(level))
+            return
+        }
+
+        if supportsCoreHaptics { startCoreEngineIfNeeded() }
+        if let engine = core {
+            do {
+                let event = CHHapticEvent(
+                    eventType: .hapticContinuous,
+                    parameters: [
+                        CHHapticEventParameter(parameterID: .hapticIntensity, value: level),
+                        CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.5)
+                    ],
+                    relativeTime: 0,
+                    duration: length
+                )
+                let hapticPattern = try CHHapticPattern(events: [event], parameters: [])
+                let player = try engine.makePlayer(with: hapticPattern)
+                activePlayer = player
+                try player.start(atTime: CHHapticTimeImmediate)
+                await pause(length)
+                return
+            } catch {
+                // fall through to the tap-train fallback
+            }
+        }
+
+        // Fallback (no Core Haptics, e.g. simulator): a fast train of taps for `length` seconds.
+        var elapsed = 0.0
+        while elapsed < length && !Task.isCancelled {
+            heavy.impactOccurred(intensity: CGFloat(level))
+            await pause(0.07)
+            elapsed += 0.07
+        }
+    }
+
+    private func startCoreEngineIfNeeded() {
+        guard core == nil else { return }
+        do {
+            let engine = try CHHapticEngine()
+            engine.isAutoShutdownEnabled = false
+            engine.playsHapticsOnly = true
+            engine.stoppedHandler = { [weak self] _ in
+                Task { @MainActor in self?.core = nil }
+            }
+            engine.resetHandler = { [weak self] in
+                Task { @MainActor in self?.core = nil }
+            }
+            try engine.start()
+            core = engine
+        } catch {
+            core = nil
+        }
     }
 
     private func emit(_ stage: VisualStage) {
@@ -204,18 +229,18 @@ final class HapticEngine {
     }
 
     private func pulses(_ count: Int, generator: UIImpactFeedbackGenerator? = nil,
-                        gap: Double? = nil) async {
+                        gap: Double) async {
         let gen = generator ?? impact
-        let actualGap = gap ?? customPulseGap
         guard count > 0 else { return }
         for _ in 0..<count {
             if Task.isCancelled { return }
             gen.impactOccurred()
-            await pause(actualGap)
+            await pause(gap)
         }
     }
 
     private func pause(_ seconds: Double) async {
+        guard seconds > 0 else { return }
         try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
     }
 }

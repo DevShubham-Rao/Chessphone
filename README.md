@@ -45,6 +45,28 @@ there too.
   + two warning buzzes for check, + three heavy thumps for game over).
   Shake repeats the last recommended move.
 
+## Audio (spoken moves)
+Vibration Settings -> Audio. The engine's move is also spoken, e.g. "Knight, gee one to eff three".
+- Timing: same time as the vibration, after it, or audio only (no vibration).
+- Wording: squares ("ay two to ay four") or the tap numbers ("one, two to one, four").
+- Optional piece name, captures, promotion, check and game result are included. Speed and loudness are adjustable.
+- Shake repeats the last spoken/vibrated move.
+
+## Fully adjustable vibration sequence
+Vibration Settings -> Vibration sequence. The vibration for a move is a list of steps played top to bottom.
+Every step has its own numbers, and you can reorder (Edit), delete and add steps:
+- Pause: how long to wait.
+- Start / Switch / Done / Extra buzz: one continuous vibration, with its own length and strength.
+- FROM column / FROM row / TO column / TO row / Promotion pulses: the number of pulses comes from the move;
+  you set the gap between pulses, how long each pulse lasts (0 = short tap) and its strength.
+Example: Pause 1.0 s -> FROM column pulses with 0.5 s gaps -> Pause 1.0 s -> Extra buzz 0.1 s.
+"Easy" and "Fast" presets reset the list. Use "Test vibration" to try it.
+
+## Practice mode
+"Practice vibrations" on the first screen. It vibrates a random move with your current settings; work out the
+squares in your head, then tap Show answer (or Volume down). Volume up replays, Volume down = answer, then next move.
+Choose real chess moves or any random squares. Audio is only spoken when you reveal, so it never gives the answer away.
+
 ## Safety checks
 - The app has its own rules engine (ChessRules.swift). Your move is checked twice:
   once when you finish entering it, and again inside `ChessGame.play()`, which
