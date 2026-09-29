@@ -30,7 +30,7 @@ struct ContentView: View {
                     .padding(.horizontal, 28).padding(.vertical, 16)
                     .background(Color.black).foregroundColor(.white).cornerRadius(8)
             }
-            Text("White: the engine recommends your move with vibration. You then enter your opponent's move.")
+            Text("Choose your color. Stockfish recommends your moves; when it is waiting for the opponent, enter their move with the volume buttons.")
                 .font(.caption).foregroundColor(.secondary).multilineTextAlignment(.center).padding(.horizontal)
             Button { showingSettings = true } label: {
                 Label("Vibration Settings", systemImage: "iphone.radiowaves.left.and.right")
@@ -56,8 +56,7 @@ struct ContentView: View {
 
                 BoardView(board: vm.game.board, bottomColor: vm.playerColor,
                           lastMove: vm.lastMove, selected: vm.selectedSquare,
-                          targets: vm.legalTargets, checkSquare: vm.game.checkedKingSquare,
-                          hapticStage: vm.hapticVisualStage)
+                          targets: vm.legalTargets, checkSquare: vm.game.checkedKingSquare)
                     .padding(.horizontal, 8)
 
                 Text(vm.status).font(.headline).multilineTextAlignment(.center).padding(.horizontal)
@@ -139,8 +138,8 @@ private struct HapticSettingsView: View {
                     }
                 }
                 Section("Easy pattern") {
-                    Text("LONG START → count the highlighted file → pause → count the highlighted rank → LONG SWITCH → count the destination file → pause → count the destination rank → TWO LONG DONE.")
-                    Text("The board highlights the same file or rank as each vibration. The current one is bright; completed ones stay lightly highlighted.")
+                    Text("A strong buzz marks the start of each coordinate. Count the medium buzzes. Two strong buzzes separate FROM from TO.")
+                    Text("Easy mode deliberately uses longer pauses so each number is easier to count.")
                         .foregroundColor(.secondary)
                 }
                 Section {

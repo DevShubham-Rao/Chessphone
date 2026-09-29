@@ -35,13 +35,13 @@ final class ChessPhoneViewModel: ObservableObject {
     @Published private(set) var engineStatus: String = "Engine: starting..."
     @Published private(set) var lastEngineMove: String = ""
     @Published private(set) var recommendedMoveText: String = ""
-    @Published private(set) var hapticVisualStage: HapticEngine.VisualStage = .idle
 
     // Half-entered move (0-based file / rank)
     private var sourceFile = 0
     private var sourceRank = 0
     private var targetFile = 0
     private var promotionCandidates: [Move] = []
+    private var promotionIsOpponentMove = false
 
     private var engineTask: Task<Void, Never>?
     /// Bumped on every new game so a late engine answer from an old game is ignored.
@@ -54,12 +54,6 @@ final class ChessPhoneViewModel: ObservableObject {
     func startInputs() {
         guard !inputsRunning else { return }
         inputsRunning = true
-
-        // Mirror every haptic step on the board so the visual and physical
-        // instructions stay synchronized.
-        HapticEngine.shared.onVisualStage = { [weak self] stage in
-            self?.hapticVisualStage = stage
-        }
 
         VolumeButtonHandler.shared.onVolumeUp = { [weak self] in
             Task { @MainActor in self?.handleVolumeUp() }
@@ -170,10 +164,12 @@ final class ChessPhoneViewModel: ObservableObject {
         resetGameState()
         playerColor = color
         if color == .white {
-            startWhiteRecommendation()
+            // White moves first, so Stockfish recommends White's move.
+            startPlayerRecommendation()
         } else {
-            // Black: the engine (White) moves first.
-            startEngineTurn(prefix: "You are Black. ")
+            // Black moves second. Do NOT auto-play White's first move;
+            // wait for the user to enter White's move with the volume buttons.
+            startOpponentMoveEntry(prefix: "You are Black. White moves first. ")
         }
     }
 
@@ -191,7 +187,7 @@ final class ChessPhoneViewModel: ObservableObject {
     func retryEngine() {
         guard phase == .engineFailed else { return }
         engineStatus = "Engine: retrying..."
-        startEngineTurn(prefix: "")
+        startPlayerRecommendation()
     }
 
     private func resetGameState() {
@@ -200,6 +196,7 @@ final class ChessPhoneViewModel: ObservableObject {
         selectedSquare = nil
         legalTargets = []
         promotionCandidates = []
+        promotionIsOpponentMove = false
         lastEngineMove = ""
         recommendedMoveText = ""
         tapCount = 0
@@ -269,6 +266,7 @@ final class ChessPhoneViewModel: ObservableObject {
             }
             if candidates.count > 1 || candidates[0].promotion != nil {
                 promotionCandidates = candidates
+                promotionIsOpponentMove = false
                 phase = .promotion
                 status = "Promotion! Tap 1=Queen 2=Rook 3=Bishop 4=Knight, then volume down."
                 HapticEngine.shared.confirm()
@@ -282,7 +280,7 @@ final class ChessPhoneViewModel: ObservableObject {
                 reject("Promotion choices are 1=Queen 2=Rook 3=Bishop 4=Knight.")
                 return
             }
-            if playerColor == .white {
+            if promotionIsOpponentMove {
                 commitOpponentMove(move)
             } else {
                 commitPlayerMove(move)
@@ -308,17 +306,19 @@ final class ChessPhoneViewModel: ObservableObject {
         selectedSquare = nil
         legalTargets = []
         promotionCandidates = []
+        promotionIsOpponentMove = false
         tapCount = 0
         status = message
         HapticEngine.shared.error()
     }
 
-    // MARK: - White training flow
+    // MARK: - Player recommendation flow
     //
-    // For White, the engine's move is applied to the internal position so the
-    // opponent's reply can be validated, but it is NOT presented as a move the
-    // user entered. The user only enters the opponent's move.
-    private func startWhiteRecommendation() {
+    // Stockfish recommends a move only when it is the selected player's turn.
+    // The recommended move is applied to the internal position so the next
+    // opponent move can be validated, but it is NOT entered through the
+    // volume controls and is never treated as an opponent move.
+    private func startPlayerRecommendation() {
         phase = .engineCalculating
         tapCount = 0
         status = "Engine is finding your best move..."
@@ -327,11 +327,11 @@ final class ChessPhoneViewModel: ObservableObject {
         let generation = gameGeneration
         engineTask?.cancel()
         engineTask = Task { [weak self] in
-            await self?.runWhiteRecommendation(generation: generation)
+            await self?.runPlayerRecommendation(generation: generation)
         }
     }
 
-    private func runWhiteRecommendation(generation: Int) async {
+    private func runPlayerRecommendation(generation: Int) async {
         let fen = game.fen
         var chosen: Move?
         var failure = ""
@@ -374,8 +374,20 @@ final class ChessPhoneViewModel: ObservableObject {
         }
 
         phase = .opponentSourceColumn
-        status = "Play \(move.uci) as White. Then enter your opponent's move."
+        let sideName = playerColor == .white ? "White" : "Black"
+        status = "Play \(move.uci) as \(sideName). Then enter your opponent's move."
         playHaptics(for: move, suffix: game.isInCheck ? .check : .none)
+    }
+
+    private func startOpponentMoveEntry(prefix: String = "") {
+        phase = .opponentSourceColumn
+        tapCount = 0
+        selectedSquare = nil
+        legalTargets = []
+        promotionCandidates = []
+        promotionIsOpponentMove = false
+        recommendedMoveText = ""
+        status = prefix + "Enter the opponent's FROM column."
     }
 
     private func confirmOpponentInput() {
@@ -434,8 +446,7 @@ final class ChessPhoneViewModel: ObservableObject {
 
             if candidates.count > 1 || candidates[0].promotion != nil {
                 promotionCandidates = candidates
-                // Keep promotion support simple for now: the existing promotion
-                // phase is used and commitOpponentMove handles the selected move.
+                promotionIsOpponentMove = true
                 phase = .promotion
                 status = "Opponent promotion: 1=Queen 2=Rook 3=Bishop 4=Knight, then volume down."
                 HapticEngine.shared.confirm()
@@ -463,7 +474,9 @@ final class ChessPhoneViewModel: ObservableObject {
         if let outcome = game.outcome {
             finishGame(outcome)
         } else {
-            startWhiteRecommendation()
+            // After the opponent moves, Stockfish recommends the selected
+            // player's next move. This is the same flow for White and Black.
+            startPlayerRecommendation()
         }
     }
 
@@ -472,6 +485,7 @@ final class ChessPhoneViewModel: ObservableObject {
         selectedSquare = nil
         legalTargets = []
         promotionCandidates = []
+        promotionIsOpponentMove = false
         tapCount = 0
         status = message
         HapticEngine.shared.error()
@@ -494,7 +508,9 @@ final class ChessPhoneViewModel: ObservableObject {
         if let outcome = game.outcome {
             finishGame(outcome)
         } else {
-            startEngineTurn(prefix: "You played \(move.uci). ")
+            // This path is retained for manual player input, but the normal
+            // training flow uses Stockfish recommendations instead.
+            startOpponentMoveEntry(prefix: "You played \(move.uci). ")
         }
     }
 
