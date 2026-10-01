@@ -123,10 +123,15 @@ final class EngineManager {
     /// Best move (UCI, e.g. "e7e5" or "e7e8q") for the given position, or nil on
     /// failure - in which case `lastError` explains why. There is deliberately no
     /// made-up fallback move: a broken engine is reported, not hidden.
-    func bestMove(fen: String, depth: Int = 12) async -> String? {
+    func bestMove(fen: String, depth: Int = 30, skillLevel: Int = 20) async -> String? {
         lastError = ""
         guard await ensureStarted() else { return nil }
-        let result = await search(fen: fen, depth: depth, timeout: 30)
+        let clampedSkill = max(0, min(skillLevel, 20))
+        if let engine = engine {
+            // Stockfish's built-in Skill Level is 0...20. The app searches up to depth 30; the skill setting controls move quality.
+            await engine.send(command: .setoption(id: "Skill Level", value: String(clampedSkill)))
+        }
+        let result = await search(fen: fen, depth: depth, timeout: 120)
         if result == nil && lastError.isEmpty {
             lastError = "Stockfish did not return a move in time."
         }

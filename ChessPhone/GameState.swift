@@ -24,6 +24,36 @@ enum InputPhase: Equatable {
 ///
 /// Columns/rows are always real board coordinates (a1 = 1,1 ... h8 = 8,8),
 /// regardless of which side you play. Only the on-screen board flips.
+private struct SavedGame: Codable {
+    let moves: [String]
+    let playerColor: Int
+    let skillLevel: Int
+}
+
+private enum GameSaveStore {
+    static let key = "ChessPhone.savedGame"
+
+    static func save(game: ChessGame, playerColor: PieceColor, skillLevel: Int) {
+        let payload = SavedGame(
+            moves: game.moveHistory.map(\.uci),
+            playerColor: playerColor.rawValue,
+            skillLevel: skillLevel
+        )
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+
+    static func load() -> SavedGame? {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let saved = try? JSONDecoder().decode(SavedGame.self, from: data) else { return nil }
+        return saved
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+}
+
 @MainActor
 final class ChessPhoneViewModel: ObservableObject {
     @Published private(set) var phase: InputPhase = .selectSide
@@ -38,6 +68,10 @@ final class ChessPhoneViewModel: ObservableObject {
     @Published private(set) var lastEngineMove: String = ""
     @Published private(set) var recommendedMoveText: String = ""
     @Published private(set) var hapticVisualStage: HapticEngine.VisualStage = .idle
+    @Published var skillLevel: Int = 20
+    @Published private(set) var hasSavedGame = false
+
+    private let fixedSearchDepth = 30
 
     // Half-entered move (0-based file / rank)
     private var sourceFile = 0
@@ -52,6 +86,13 @@ final class ChessPhoneViewModel: ObservableObject {
     private var inputsRunning = false
     /// What was last announced out loud, so shaking the phone can repeat it.
     private var lastSpokenText = ""
+
+    init() {
+        if let saved = GameSaveStore.load() {
+            skillLevel = max(1, min(saved.skillLevel, 20))
+            hasSavedGame = true
+        }
+    }
 
     // MARK: - Lifecycle
 
@@ -185,8 +226,143 @@ final class ChessPhoneViewModel: ObservableObject {
         HapticEngine.shared.cancel()
         SpeechEngine.shared.stop()
         resetGameState()
+        GameSaveStore.clear()
+        hasSavedGame = false
         phase = .selectSide
         status = "Choose your side."
+    }
+
+    func saveCurrentGame() {
+        guard phase != .selectSide else { return }
+        GameSaveStore.save(game: game, playerColor: playerColor, skillLevel: skillLevel)
+        hasSavedGame = true
+        status = "Game saved."
+    }
+
+    func resumeSavedGame() {
+        guard let saved = GameSaveStore.load(),
+              let color = PieceColor(rawValue: saved.playerColor) else {
+            hasSavedGame = false
+            return
+        }
+
+        gameGeneration += 1
+        engineTask?.cancel()
+        engineTask = nil
+        EngineManager.shared.cancelSearch()
+        HapticEngine.shared.cancel()
+        SpeechEngine.shared.stop()
+
+        let moves = saved.moves.compactMap { Move(uci: $0) }
+        let rebuilt = ChessGame(moves: moves)
+
+        // Only accept a save if every recorded move rebuilt cleanly.
+        guard rebuilt.moveHistory.count == moves.count else {
+            GameSaveStore.clear()
+            hasSavedGame = false
+            status = "The saved game could not be restored."
+            return
+        }
+
+        playerColor = color
+        skillLevel = max(1, min(saved.skillLevel, 20))
+        game = rebuilt
+        lastMove = game.moveHistory.last
+        selectedSquare = nil
+        legalTargets = []
+        promotionCandidates = []
+        tapCount = 0
+        recommendedMoveText = lastMove?.uci.uppercased() ?? ""
+        hasSavedGame = true
+
+        if game.outcome != nil {
+            phase = .gameOver
+            status = game.outcome?.summary ?? "Game over."
+        } else if game.sideToMove == playerColor {
+            startRecommendation()
+        } else {
+            phase = .opponentSourceColumn
+            status = "Saved game restored. Enter your opponent's FROM column."
+        }
+    }
+
+    func undo() {
+        guard phase != .selectSide else { return }
+
+        // Cancel a partially entered move without changing the board.
+        if [.opponentSourceColumn, .opponentSourceRow, .opponentTargetColumn,
+            .opponentTargetRow, .promotion].contains(phase) {
+            selectedSquare = nil
+            legalTargets = []
+            promotionCandidates = []
+            tapCount = 0
+            phase = game.sideToMove == playerColor ? .engineCalculating : .opponentSourceColumn
+            status = "Move entry cancelled."
+            if phase == .engineCalculating { startRecommendation() }
+            return
+        }
+
+        gameGeneration += 1
+        engineTask?.cancel()
+        engineTask = nil
+        EngineManager.shared.cancelSearch()
+        HapticEngine.shared.cancel()
+        SpeechEngine.shared.stop()
+
+        var moves = game.moveHistory
+
+        switch phase {
+        case .engineCalculating:
+            // The last completed move is the opponent's move. Remove only it,
+            // restoring the engine recommendation that was on the board.
+            if !moves.isEmpty { moves.removeLast() }
+
+        case .opponentSourceColumn, .opponentSourceRow, .opponentTargetColumn,
+             .opponentTargetRow, .promotion:
+            // Handled above.
+            break
+
+        case .gameOver:
+            // Remove the last full turn when possible. If the last move was
+            // the engine's move, remove just that move.
+            if let last = moves.last {
+                let lastMover = game.sideToMove.opposite
+                if lastMover == playerColor {
+                    moves.removeLast()
+                } else {
+                    moves.removeLast()
+                    if !moves.isEmpty { moves.removeLast() }
+                }
+            }
+
+        case .selectSide:
+            break
+        }
+
+        game = ChessGame(moves: moves)
+        lastMove = game.moveHistory.last
+        selectedSquare = nil
+        legalTargets = []
+        promotionCandidates = []
+        tapCount = 0
+        recommendedMoveText = lastMove?.uci.uppercased() ?? ""
+
+        if game.moveHistory.isEmpty {
+            recommendedMoveText = ""
+            GameSaveStore.clear()
+            hasSavedGame = false
+            phase = .selectSide
+            status = "Choose your side."
+        } else if game.outcome != nil {
+            phase = .gameOver
+            status = game.outcome?.summary ?? "Game over."
+        } else if game.sideToMove == playerColor {
+            startRecommendation()
+        } else {
+            phase = .opponentSourceColumn
+            status = "Takeback complete. Enter your opponent's FROM column."
+        }
+        saveCurrentGame()
     }
 
     func retryEngine() {
@@ -239,7 +415,11 @@ final class ChessPhoneViewModel: ObservableObject {
         var failure = ""
 
         for _ in 0..<2 {
-            let reply = await EngineManager.shared.bestMove(fen: fen)
+            let reply = await EngineManager.shared.bestMove(
+                fen: fen,
+                depth: fixedSearchDepth,
+                skillLevel: skillLevel
+            )
             guard generation == gameGeneration else { return }
 
             guard let uci = reply else {
@@ -282,6 +462,7 @@ final class ChessPhoneViewModel: ObservableObject {
 
         phase = .opponentSourceColumn
         status = "Play \(move.uci) as \(playerColor.name). Then enter your opponent's move."
+        saveCurrentGame()
         announce(move, suffix: game.isInCheck ? .check : .none, piece: mover, captured: captured)
     }
 
@@ -376,6 +557,7 @@ final class ChessPhoneViewModel: ObservableObject {
         if let outcome = game.outcome {
             finishGame(outcome)
         } else {
+            saveCurrentGame()
             startRecommendation()
         }
     }
@@ -391,6 +573,8 @@ final class ChessPhoneViewModel: ObservableObject {
     }
 
     private func finishGame(_ outcome: GameOutcome) {
+        GameSaveStore.save(game: game, playerColor: playerColor, skillLevel: skillLevel)
+        hasSavedGame = true
         phase = .gameOver
         selectedSquare = nil
         legalTargets = []

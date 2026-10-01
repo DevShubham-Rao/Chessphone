@@ -32,6 +32,30 @@ struct ContentView: View {
                     .padding(.horizontal, 28).padding(.vertical, 16)
                     .background(Color.black).foregroundColor(.white).cornerRadius(8)
             }
+
+            VStack(spacing: 6) {
+                Text("Engine strength: \(vm.skillLevel)/20")
+                    .font(.subheadline.bold())
+                Slider(
+                    value: Binding(
+                        get: { Double(vm.skillLevel) },
+                        set: { vm.skillLevel = max(1, min(20, Int($0.rounded()))) }
+                    ),
+                    in: 1...20,
+                    step: 1
+                )
+                Text("Depth 30 • Level 20 = full Stockfish strength")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            .padding(.horizontal)
+
+            if vm.hasSavedGame {
+                Button { vm.resumeSavedGame() } label: {
+                    Label("Resume Saved Game", systemImage: "arrow.counterclockwise.circle")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
             Text("The engine tells you your moves with vibration. You only enter your opponent's moves. White: the engine recommends your first move right away. Black: enter White's first move, then the engine recommends your reply.")
                 .font(.caption).foregroundColor(.secondary).multilineTextAlignment(.center).padding(.horizontal)
             Button { showingSettings = true } label: {
@@ -56,12 +80,14 @@ struct ContentView: View {
                     Button { showingSettings = true } label: {
                         Image(systemName: "gearshape")
                     }.accessibilityLabel("Vibration and Audio Settings")
+                    Button("Save") { vm.saveCurrentGame() }.font(.subheadline)
+                    Button("Takeback") { vm.undo() }.font(.subheadline)
                     Button("New Game") { vm.newGame() }.font(.subheadline)
                 }.padding(.horizontal)
 
-                // Always draw the board from White's side (a-h left to right, rank 1 at the bottom),
-                // even when playing Black, so it matches the numbers you enter.
-                BoardView(board: vm.game.board, bottomColor: .white,
+                // Show the board from your side. Black is rotated like a real
+                // opponent sitting across from White.
+                BoardView(board: vm.game.board, bottomColor: vm.playerColor,
                           lastMove: vm.lastMove, selected: vm.selectedSquare,
                           targets: vm.legalTargets, checkSquare: vm.game.checkedKingSquare,
                           hapticStage: vm.hapticVisualStage)

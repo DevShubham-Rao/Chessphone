@@ -526,6 +526,15 @@ struct ChessGame {
         repetitionCounts[position.repetitionKey] = 1
     }
 
+    /// Rebuilds a game from a previously saved sequence of legal moves.
+    /// This preserves castling, en-passant, promotion, repetition, and draw state.
+    init(moves: [Move]) {
+        self.init()
+        for move in moves {
+            guard play(move) else { break }
+        }
+    }
+
     var sideToMove: PieceColor { position.sideToMove }
     var fen: String { position.fen }
     var board: [Piece?] { position.board }
