@@ -44,8 +44,26 @@ struct ContentView: View {
                     in: 1...20,
                     step: 1
                 )
-                Text("Depth 30 • Level 20 = full Stockfish strength")
+                Text("Level 20 = full Stockfish strength")
                     .font(.caption).foregroundColor(.secondary)
+
+                Text("Search depth: \(vm.searchDepth)")
+                    .font(.subheadline.bold())
+                    .padding(.top, 6)
+                Slider(
+                    value: Binding(
+                        get: { Double(vm.searchDepth) },
+                        set: { vm.searchDepth = max(1, min(30, Int($0.rounded()))) }
+                    ),
+                    in: 1...30,
+                    step: 1
+                )
+                Text("Higher = stronger but slower (1-30)")
+                    .font(.caption).foregroundColor(.secondary)
+
+                Toggle("Black: number the board from my seat", isOn: $vm.blackSeatNumbering)
+                    .font(.subheadline)
+                    .padding(.top, 6)
             }
             .padding(.horizontal)
 
@@ -90,7 +108,8 @@ struct ContentView: View {
                 BoardView(board: vm.game.board, bottomColor: vm.playerColor,
                           lastMove: vm.lastMove, selected: vm.selectedSquare,
                           targets: vm.legalTargets, checkSquare: vm.game.checkedKingSquare,
-                          hapticStage: vm.hapticVisualStage)
+                          hapticStage: vm.hapticVisualStage,
+                          seatFlipped: vm.seatFlipped)
                     .padding(.horizontal, 8)
 
                 Text(vm.status).font(.headline).multilineTextAlignment(.center).padding(.horizontal)

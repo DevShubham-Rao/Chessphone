@@ -131,7 +131,7 @@ final class EngineManager {
             // Stockfish's built-in Skill Level is 0...20. The app searches up to depth 30; the skill setting controls move quality.
             await engine.send(command: .setoption(id: "Skill Level", value: String(clampedSkill)))
         }
-        let result = await search(fen: fen, depth: depth, timeout: 120)
+        let result = await search(fen: fen, depth: max(1, min(depth, 30)), timeout: 60)
         if result == nil && lastError.isEmpty {
             lastError = "Stockfish did not return a move in time."
         }
@@ -190,7 +190,19 @@ final class EngineManager {
         }
     }
 
+    /// Soft time limit: ask Stockfish to stop. It answers with the best move found
+    /// so far, which then resolves the search normally (deep searches on a phone can be slow).
+    /// If it still hasn't answered 5 s later, give up and report a timeout.
     private func timeoutSearch(token: Int) {
+        guard pendingToken == token, pending != nil, let engine = engine else { return }
+        stopTask = Task { await engine.send(command: .stop) }
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            self?.hardTimeoutSearch(token: token)
+        }
+    }
+
+    private func hardTimeoutSearch(token: Int) {
         guard pendingToken == token, let continuation = pending else { return }
         pending = nil
         staleBestmoves += 1

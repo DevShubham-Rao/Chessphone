@@ -15,6 +15,9 @@ struct BoardView: View {
     let targets: Set<Int>
     let checkSquare: Int?
     let hapticStage: HapticEngine.VisualStage
+    /// Black seat numbering: labels read a...h left to right and 1...8 bottom to top
+    /// as seen from Black's seat. (Squares themselves are drawn the same either way.)
+    var seatFlipped: Bool = false
 
     private let lightSquare = Color(red: 0.94, green: 0.85, blue: 0.71)
     private let darkSquare = Color(red: 0.71, green: 0.53, blue: 0.39)
@@ -37,7 +40,7 @@ struct BoardView: View {
             VStack(spacing: 0) {
                 ForEach(ranksTopToBottom, id: \.self) { rank in
                     HStack(spacing: 0) {
-                        Text("\(rank + 1)")
+                        Text("\(seatFlipped ? 8 - rank : rank + 1)")
                             .font(.system(size: 11, weight: .semibold))
                             .frame(width: labelSize, height: cell)
                         ForEach(files, id: \.self) { file in
@@ -48,7 +51,7 @@ struct BoardView: View {
                 HStack(spacing: 0) {
                     Spacer().frame(width: labelSize)
                     ForEach(files, id: \.self) { file in
-                        Text("\(Square.fileLetters[file])·\(file + 1)")
+                        Text("\(Square.fileLetters[seatFlipped ? 7 - file : file])·\(seatFlipped ? 8 - file : file + 1)")
                             .font(.system(size: 10, weight: .semibold))
                             .frame(width: cell, height: labelSize)
                     }
@@ -118,7 +121,10 @@ struct BoardView: View {
 
     private enum HapticCellState { case none, past, current, switchMarker, done }
 
-    private func hapticStateFor(file: Int, rank: Int) -> HapticCellState {
+    private func hapticStateFor(file realFile: Int, rank realRank: Int) -> HapticCellState {
+        // The vibration counts in seat numbering, so sweep in that numbering too.
+        let file = seatFlipped ? 7 - realFile : realFile
+        let rank = seatFlipped ? 7 - realRank : realRank
         switch hapticStage {
         case .idle:
             return .none

@@ -85,12 +85,15 @@ final class SpeechEngine: ObservableObject {
 
     /// e.g. "Knight, gee one to eff three" / "Pawn, ee two to ee four, check".
     func phrase(for move: Move, piece: PieceType?, captured: PieceType?,
-                suffix: HapticEngine.Suffix = .none, outcome: GameOutcome? = nil) -> String {
+                suffix: HapticEngine.Suffix = .none, outcome: GameOutcome? = nil,
+                mirrored: Bool = false) -> String {
         var text = ""
 
         if let piece = piece, piece == .king,
            abs(Square.file(move.to) - Square.file(move.from)) == 2 {
-            text += Square.file(move.to) > Square.file(move.from) ? "Castles kingside. " : "Castles queenside. "
+            // A mirrored (Black-seat) move has its files reversed, so flip the wording back.
+            let kingside = (Square.file(move.to) > Square.file(move.from)) != mirrored
+            text += kingside ? "Castles kingside. " : "Castles queenside. "
         }
         if includePieceName, let piece = piece {
             text += pieceName(piece) + ", "
