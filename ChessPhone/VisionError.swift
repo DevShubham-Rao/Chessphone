@@ -8,6 +8,7 @@ enum VisionError: LocalizedError {
     case glassesUnavailable
     case sdkNotLinked
     case captureTimeout
+    case captureBusy
     case imageEncodingFailed
     case http(Int, String)
     case emptyResponse
@@ -24,6 +25,7 @@ enum VisionError: LocalizedError {
         case .glassesUnavailable: return "Could not start a session with the glasses (are they on, connected and unfolded?)."
         case .sdkNotLinked: return "Meta Wearables SDK is not linked into this build."
         case .captureTimeout: return "The camera did not deliver a photo in time."
+        case .captureBusy: return "The glasses camera is already handling another capture."
         case .imageEncodingFailed: return "Could not encode the photo."
         case .http(let code, let msg): return "Gemini returned HTTP \(code): \(msg)"
         case .emptyResponse: return "Gemini returned no answer."
@@ -40,7 +42,7 @@ enum VisionError: LocalizedError {
         case .missingAPIKey: return "No API key."
         case .cameraDenied, .glassesPermissionDenied: return "Camera permission needed."
         case .glassesUnavailable, .sdkNotLinked: return "Glasses not available."
-        case .captureTimeout, .imageEncodingFailed: return "Photo failed. Try again."
+        case .captureTimeout, .captureBusy, .imageEncodingFailed: return "Photo failed. Try again."
         case .http, .emptyResponse: return "Vision service failed. Try again."
         case .boardNotVisible: return "I can't see the whole board."
         case .lowConfidence, .malformedReading: return "Couldn't read the board. Try again."

@@ -1,94 +1,125 @@
-# ChessPhone
+# ChessPhone + Ray-Ban Meta Board Scan
 
-iPhone chess app, screen-minimal: volume buttons and shake for input,
-haptics for output, real Stockfish (via chesskit-engine) for moves.
+ChessPhone is an iOS chess assistant that combines:
 
-## Controls
-- Volume UP: increment the tap counter (1, 2, 3...)
-- Volume DOWN: confirm current count, advance to next input phase
-- Shake: repeat the last haptic output
+- Ray-Ban Meta camera capture through Meta Wearables Device Access Toolkit (DAT) 1.0.0
+- iPhone camera fallback for testing
+- Gemini 2.5 Flash vision parsing
+- Stockfish through `chesskit-engine`
+- Spoken and/or haptic move output
+- Existing manual volume-button move entry, takebacks, saves, skill level, and depth controls
 
-## One-time setup: Stockfish's neural network files
-Stockfish needs two ".nnue" files to run and they're too big to ship
-in this ZIP or commit conveniently, so grab them yourself once:
+## Vision workflow
 
-1. Download these two files (click through, they're official Stockfish
-   test-server files):
-   - Big net: https://tests.stockfishchess.org/nns?network_name=1111cefa1111&user=
-   - Small net: https://tests.stockfishchess.org/nns?network_name=37f18f62d772&user=
-2. Rename them EXACTLY to:
-   - nn-1111cefa1111.nnue
-   - nn-37f18f62d772.nnue
-3. Put both in this project's Resources/ folder (next to this README).
+When **Board scanning** is enabled and the app is waiting for the opponent's move:
 
-They're gitignored on purpose (they're large binaries), but that's
-fine: `builder ios build` pushes your whole working tree, gitignore
-rules aside -- so as long as they're sitting in Resources/ on your
-machine when you run the build, they'll be included and bundled into
-the app. If you ever build on a different machine, redo steps 1-3
-there too.
+1. Press **Volume Up** on the iPhone.
+2. The active image source captures the board.
+3. The image is normalized and JPEG-compressed to at most **1024 px on its longest edge**.
+4. The JPEG is sent to **`gemini-2.5-flash`** with a strict JSON response schema.
+5. The app converts Gemini's camera-relative 8x8 rows into true chess coordinates.
+6. The scan is compared with the app's tracked legal position.
+   - If exactly one legal opponent move explains the photo, that move is committed normally.
+   - If the board is unchanged, the last engine recommendation is replayed.
+   - If the board and saved history have drifted apart, the app validates the photographed position, builds a FEN, and asks Stockfish directly without corrupting the saved game.
+7. Stockfish returns a UCI move.
+8. The existing output settings speak the move, vibrate it, or do both.
 
-## How it plays
-- Pick WHITE or BLACK. The engine always advises YOU; you only type in your opponent's moves.
-  - White: the engine recommends your first move right away (haptics + text). You play it on
-    your real board, then enter your opponent's reply.
-  - Black: nothing is played automatically. Enter White's first move, then the engine
-    recommends your reply.
-- Enter the opponent's move as four numbers: FROM column, FROM row, TO column, TO row.
-  Columns 1-8 = a-h, rows 1-8. These are always real board coordinates
-  (a1 = 1,1; h8 = 8,8) whichever side you play; only the on-screen board flips.
-- Volume UP counts taps, Volume DOWN confirms the number and moves to the next step.
-  Confirming with 0 taps cancels the move you're entering. Max 8 taps (4 for promotion).
-- Pawn promotion asks for a fifth number: 1=Queen 2=Rook 3=Bishop 4=Knight.
-- The engine's move is played back as haptics: from-col pulses, from-row pulses,
-  a success buzz, to-col pulses, to-row pulses (+ heavy pulses for promotion,
-  + two warning buzzes for check, + three heavy thumps for game over).
-  Shake repeats the last recommended move.
+## Ray-Ban Meta support
 
-## Audio (spoken moves)
-Vibration Settings -> Audio. The engine's move is also spoken, e.g. "Knight, gee one to eff three".
-- Timing: same time as the vibration, after it, or audio only (no vibration).
-- Wording: squares ("ay two to ay four") or the tap numbers ("one, two to one, four").
-- Optional piece name, captures, promotion, check and game result are included. Speed and loudness are adjustable.
-- Shake repeats the last spoken/vibrated move.
+This project uses Meta's current iOS Device Access Toolkit instead of trying to expose the glasses as an `AVCaptureDevice`. The glasses camera is not a normal iOS camera input. Registration, camera permission, device session creation, and photo capture all go through Meta's SDK and Meta AI companion app.
 
-## Fully adjustable vibration sequence
-Vibration Settings -> Vibration sequence. The vibration for a move is a list of steps played top to bottom.
-Every step has its own numbers, and you can reorder (Edit), delete and add steps:
-- Pause: how long to wait.
-- Start / Switch / Done / Extra buzz: one continuous vibration, with its own length and strength.
-- FROM column / FROM row / TO column / TO row / Promotion pulses: the number of pulses comes from the move;
-  you set the gap between pulses, how long each pulse lasts (0 = short tap) and its strength.
-Example: Pause 1.0 s -> FROM column pulses with 0.5 s gaps -> Pause 1.0 s -> Extra buzz 0.1 s.
-"Easy" and "Fast" presets reset the list. Use "Test vibration" to try it.
+The project is pinned to:
 
-## Practice mode
-"Practice vibrations" on the first screen. It vibrates a random move with your current settings; work out the
-squares in your head, then tap Show answer (or Volume down). Volume up replays, Volume down = answer, then next move.
-Choose real chess moves or any random squares. Audio is only spoken when you reveal, so it never gives the answer away.
+- `meta-wearables-dat-ios` **1.0.0**
+- `MWDATCore`
+- `MWDATCamera`
+- iOS deployment target **17.2**
 
-## Safety checks
-- The app has its own rules engine (ChessRules.swift). Your move is checked twice:
-  once when you finish entering it, and again inside `ChessGame.play()`, which
-  regenerates the legal moves and verifies your king isn't left in check.
-- The engine's reply is also verified against those legal moves before it is played.
-- Stockfish always receives the app's exact position as a FEN, so the two can't
-  drift out of sync.
-- At launch the app runs a test search; if Stockfish can't answer, the screen says
-  so (usually: NNUE files missing) instead of quietly playing a made-up move.
+The camera stream is kept warm at high resolution / 2 FPS so a Volume Up press can request a still without reconnecting first. The low frame rate leaves more transport bandwidth for the photo.
 
-## What's still not implemented
-- Undo / takebacks.
-- Skill levels (the engine always searches to depth 12).
-- Saving a game in progress.
+## First-time setup
 
-## Building & installing
-Not a Builder project on its own (no builder.json) unless you've
-already run `builder init` in this folder -- see prior setup:
-  builder auth github
-  builder init
-  builder signing setup --distribution development --devices-from-mobai
-  builder ios build --profile development --distribute
-Or use the included plain GitHub Actions workflow for an unsigned
-build to confirm it compiles (won't have the NNUE files unless you
-commit them there instead -- see workflow file).
+### 1. Meta glasses
+
+1. Install/update the Meta AI companion app on the iPhone.
+2. Pair the Ray-Ban Meta glasses normally.
+3. Enable **Developer Mode** for the glasses in Meta AI.
+4. Build and run ChessPhone on a real iPhone.
+5. Open **Vibration & Audio Settings → Board scanning**.
+6. Choose **Ray-Ban Meta glasses**.
+7. Tap **Connect Ray-Ban Meta glasses** and approve the registration/permission flow in Meta AI.
+8. Turn on **Volume Up scans the board**.
+
+For Developer Mode, `project.yml` uses placeholder Meta app credentials (`MetaAppID` / `ClientToken` = `0`). For a release-channel build, replace these with values from the Wearables Developer Center and build with the correct Apple Development Team.
+
+### 2. Gemini key
+
+The Gemini API key is never hard-coded in source. Supported lookup order:
+
+1. **Keychain**: paste it in Board scanning settings and tap **Save key to Keychain**.
+2. **Untracked plist**: copy `Resources/Secrets.example.plist` to `Resources/Secrets.plist` and replace the placeholder.
+3. **Xcode environment variable**: set `GEMINI_API_KEY` in the run scheme.
+
+`Resources/Secrets.plist` is gitignored.
+
+For an app distributed to other people, do not ship a reusable Gemini key in the app bundle. Put Gemini behind your own server/proxy and issue short-lived authenticated requests from the app.
+
+### 3. Stockfish NNUE files
+
+Both required network files are already present in `Resources/` in this ZIP:
+
+- `nn-1111cefa1111.nnue`
+- `nn-37f18f62d772.nnue`
+
+The app checks for both before declaring Stockfish ready.
+
+## Build
+
+This is an XcodeGen project.
+
+```bash
+brew install xcodegen
+xcodegen generate
+open ChessPhone.xcodeproj
+```
+
+For current Meta DAT builds, use a current Xcode toolchain compatible with the SDK. Run on a real iPhone for Ray-Ban Meta and volume-button testing.
+
+The included Builder/GitHub workflow can also generate the Xcode project before building.
+
+## Important iPhone Volume Up behavior
+
+Apple does not expose a dedicated public "hardware Volume Up button pressed" callback. This app observes `AVAudioSession.outputVolume` and embeds an `MPVolumeView`, then restores the volume to a midpoint after a press. This works only on a real device and is intentionally isolated in `VolumeButtonHandler.swift` / `MPVolumeSetter.swift`.
+
+Because it is volume-state observation rather than a formal button-event API, test this on every iOS version you plan to use. If you later want a glasses-native trigger, Meta DAT 1.0 also introduced an experimental Inputs module, but this project does not require that experimental capability.
+
+## Main vision files
+
+- `ChessPhone/GlassesCameraSource.swift`: Meta registration/session/camera/photo capture
+- `ChessPhone/BoardImageSource.swift`: image-source protocol + iPhone fallback
+- `ChessPhone/ImagePreprocessor.swift`: 1024 px JPEG normalization
+- `ChessPhone/GeminiKeyProvider.swift`: Keychain/plist/environment key loading
+- `ChessPhone/GeminiBoardReader.swift`: Gemini 2.5 Flash structured vision request
+- `ChessPhone/BoardPosition.swift`: orientation, sanity checks, scan-to-move matching, FEN-ready position
+- `ChessPhone/VisionCoordinator.swift`: capture → compress → Gemini orchestration + settings UI
+- `ChessPhone/GameState.swift`: Volume Up trigger and scan → Stockfish integration
+
+## Testing status
+
+Performed in this package:
+
+- Swift parser check over every `.swift` source file
+- `project.yml` YAML validation
+- Compiled pure-Swift tests for White camera orientation, Black camera orientation, legal scan matching (`e2e4`), and rebuilding a scanned position
+- Verified both Stockfish NNUE files are present and non-empty
+
+Still requires a real Apple/Meta environment:
+
+- Xcode compile/link against the Meta binary SDK
+- Meta AI registration callback
+- Ray-Ban Meta physical capture
+- iPhone hardware Volume Up behavior
+- Real Gemini API request with your key
+
+Those cannot be truthfully hardware-verified from a Linux build container.

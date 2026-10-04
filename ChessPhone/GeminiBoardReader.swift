@@ -11,9 +11,8 @@ struct GeminiBoardReading: Decodable {
 }
 
 struct GeminiBoardReader {
-    /// Model ID lives here so it is a one-line change. Google has announced 2.5-generation
-    /// models are being retired around October 2026 - if requests start failing with 404,
-    /// switch this to the current Flash model.
+    /// Required model for this feature. As of October 2026 the stable 2.5 Flash model
+    /// is still served, although Google limits new-project access to some 2.5 models.
     static var model = "gemini-2.5-flash"
     /// 0 = no "thinking" (fastest, ~1-2 s). If misreads are common, try 512-1024 (slower but more careful).
     static var thinkingBudget = 0

@@ -17,6 +17,7 @@ struct HapticSettingsView: View {
                 }
                 testSection
                 audioSection
+                VisionSettingsSection()
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Vibration & Audio")

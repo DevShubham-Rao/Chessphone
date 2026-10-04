@@ -1,3 +1,0 @@
-
-# Vision add-on
-Resources/Secrets.plist

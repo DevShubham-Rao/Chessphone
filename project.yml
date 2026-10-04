@@ -2,11 +2,14 @@ name: ChessPhone
 options:
   bundleIdPrefix: com.buildertest
   deploymentTarget:
-    iOS: "16.0"
+    iOS: "17.2"
 packages:
   ChessKitEngine:
     url: https://github.com/chesskit-app/chesskit-engine
     from: 0.2.0
+  MetaWearablesDAT:
+    url: https://github.com/facebook/meta-wearables-dat-ios
+    exactVersion: 1.0.0
 targets:
   ChessPhone:
     type: application
@@ -14,6 +17,10 @@ targets:
     sources: [ChessPhone, Resources]
     dependencies:
       - package: ChessKitEngine
+      - package: MetaWearablesDAT
+        product: MWDATCore
+      - package: MetaWearablesDAT
+        product: MWDATCamera
     info:
       path: ChessPhone/Info.plist
       properties:
@@ -21,12 +28,27 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIRequiresPersistentWiFi: false
-        UIBackgroundModes: []
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+            CFBundleURLSchemes: [chessphone]
+        MWDAT:
+          AppLinkURLScheme: "chessphone://"
+          MetaAppID: "0"
+          ClientToken: "0"
+          TeamID: "$(DEVELOPMENT_TEAM)"
+        LSApplicationQueriesSchemes: [fb-viewapp]
+        UIBackgroundModes: [processing, bluetooth-central, bluetooth-peripheral, external-accessory]
+        UISupportedExternalAccessoryProtocols: [com.meta.ar.wearable]
+        NSBluetoothAlwaysUsageDescription: "Connects to your Ray-Ban Meta glasses to capture the chessboard."
+        NSLocalNetworkUsageDescription: "Connects to your Ray-Ban Meta glasses over the local network for camera transfer."
+        NSBonjourServices: ["_bonjour._tcp"]
+        NSCameraUsageDescription: "Photographs the chessboard when using the iPhone camera test source."
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.buildertest.chessphone
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.1"
+        CURRENT_PROJECT_VERSION: "2"
         SWIFT_VERSION: "5.0"
     schemes:
       ChessPhone:

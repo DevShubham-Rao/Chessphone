@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Orchestrates: capture -> compress -> Gemini -> oriented board. Pure "photo to board";
-/// all chess decisions stay in ChessPhoneViewModel (see Integration/GameState-additions.swift.txt).
+/// all chess decisions stay in ChessPhoneViewModel.
 @MainActor
 final class VisionCoordinator: ObservableObject {
     static let shared = VisionCoordinator()
@@ -89,6 +89,7 @@ struct VisionSettingsSection: View {
     @ObservedObject private var vision = VisionCoordinator.shared
     @State private var keyDraft = ""
     @State private var keyStatus = GeminiKeyProvider.hasKey ? "A Gemini key is available." : "No Gemini key yet."
+    @State private var glassesStatus = ""
 
     var body: some View {
         Section(header: Text("Board scanning"),
@@ -98,7 +99,19 @@ struct VisionSettingsSection: View {
                 ForEach(VisionCoordinator.SourceKind.allCases) { Text($0.title).tag($0) }
             }
             if vision.sourceKind == .glasses {
-                Button("Connect Ray-Ban Meta glasses") { GlassesSetup.startRegistration() }
+                Button("Connect Ray-Ban Meta glasses") {
+                    Task {
+                        do {
+                            try await GlassesSetup.startRegistration()
+                            glassesStatus = "Meta AI opened for registration/approval."
+                        } catch {
+                            glassesStatus = "Could not start registration: \(error.localizedDescription)"
+                        }
+                    }
+                }
+                if !glassesStatus.isEmpty {
+                    Text(glassesStatus).font(.caption).foregroundColor(.secondary)
+                }
             }
             SecureField("Gemini API key", text: $keyDraft)
                 .textInputAutocapitalization(.never)

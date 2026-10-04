@@ -70,6 +70,7 @@ final class ChessPhoneViewModel: ObservableObject {
     @Published private(set) var lastEngineMove: String = ""
     @Published private(set) var recommendedMoveText: String = ""
     @Published private(set) var hapticVisualStage: HapticEngine.VisualStage = .idle
+    @Published private(set) var scanStatus: String = ""
     /// Stockfish "Skill Level" 1...20 (20 = full strength).
     @Published var skillLevel: Int = 20 {
         didSet { UserDefaults.standard.set(skillLevel, forKey: "ChessPhone.skillLevel") }
@@ -95,6 +96,7 @@ final class ChessPhoneViewModel: ObservableObject {
     private var promotionCandidates: [Move] = []
 
     private var engineTask: Task<Void, Never>?
+    private var scanTask: Task<Void, Never>?
     /// Bumped on every new game so a late engine answer from an old game is ignored.
     private var gameGeneration = 0
     private let shake = ShakeDetector()
@@ -145,6 +147,8 @@ final class ChessPhoneViewModel: ObservableObject {
 
     func stopInputs() {
         inputsRunning = false
+        scanTask?.cancel()
+        scanTask = nil
         VolumeButtonHandler.shared.stop()
         shake.stop()
         UIApplication.shared.isIdleTimerDisabled = false
@@ -189,6 +193,13 @@ final class ChessPhoneViewModel: ObservableObject {
     // MARK: - Hardware input
 
     func handleVolumeUp() {
+        // In vision mode, the first Volume Up press while waiting for the opponent
+        // is the shutter. Manual tap-entry remains available when vision mode is off.
+        if VisionCoordinator.shared.enabled, phase == .opponentSourceColumn, tapCount == 0 {
+            requestBoardScan()
+            return
+        }
+
         switch phase {
         case .opponentSourceColumn, .opponentSourceRow, .opponentTargetColumn, .opponentTargetRow, .promotion:
             let limit = phase == .promotion ? 4 : 8
@@ -240,6 +251,8 @@ final class ChessPhoneViewModel: ObservableObject {
         gameGeneration += 1
         engineTask?.cancel()
         engineTask = nil
+        scanTask?.cancel()
+        scanTask = nil
         EngineManager.shared.cancelSearch()
         HapticEngine.shared.cancel()
         SpeechEngine.shared.stop()
@@ -290,6 +303,8 @@ final class ChessPhoneViewModel: ObservableObject {
         gameGeneration += 1
         engineTask?.cancel()
         engineTask = nil
+        scanTask?.cancel()
+        scanTask = nil
         EngineManager.shared.cancelSearch()
         HapticEngine.shared.cancel()
         SpeechEngine.shared.stop()
@@ -354,6 +369,8 @@ final class ChessPhoneViewModel: ObservableObject {
         gameGeneration += 1
         engineTask?.cancel()
         engineTask = nil
+        scanTask?.cancel()
+        scanTask = nil
         EngineManager.shared.cancelSearch()
         HapticEngine.shared.cancel()
         SpeechEngine.shared.stop()
@@ -702,5 +719,108 @@ final class ChessPhoneViewModel: ObservableObject {
             suffix: suffix,
             onFinished: onFinished
         )
+    }
+}
+
+
+// MARK: - Vision board scanning
+
+extension ChessPhoneViewModel {
+    /// Volume Up in vision mode. Additional presses are ignored while a scan is running.
+    func requestBoardScan() {
+        guard scanTask == nil else { return }
+        guard phase == .opponentSourceColumn, tapCount == 0 else { return }
+
+        HapticEngine.shared.tick()
+        scanStatus = "Capturing board..."
+        status = "Scanning the board..."
+        let generation = gameGeneration
+
+        scanTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runBoardScan(generation: generation)
+            self.scanTask = nil
+        }
+    }
+
+    private func runBoardScan(generation: Int) async {
+        do {
+            let scan = try await VisionCoordinator.shared.captureAndRead(playerColor: playerColor)
+            guard !Task.isCancelled, generation == gameGeneration else { return }
+            scanStatus = "Board read (\(scan.confidence) confidence)."
+
+            switch ScanMatcher.match(scan, against: game.position) {
+            case .move(let move):
+                status = "Opponent move detected: \(seatText(move.uci))."
+                commitOpponentMove(move)
+
+            case .unchanged:
+                status = "The board has not changed yet. Play the recommended move, wait for the opponent, then scan again."
+                handleShakeRepeat()
+
+            case .noMatch:
+                await recommendFromScan(scan, generation: generation)
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard generation == gameGeneration else { return }
+            scanFailed(error)
+        }
+    }
+
+    /// If the photographed board no longer matches the tracked move history, use the
+    /// photographed position for this recommendation without corrupting the saved game.
+    private func recommendFromScan(_ scan: ScannedBoard, generation: Int) async {
+        do {
+            let position = try scan.makePosition(sideToMove: playerColor, rightsFrom: game.position)
+            status = "Photo differs from the tracked game. Finding a move from the photo..."
+
+            let reply = await EngineManager.shared.bestMove(
+                fen: position.fen,
+                depth: searchDepth,
+                skillLevel: skillLevel
+            )
+            guard !Task.isCancelled, generation == gameGeneration else { return }
+            guard let uci = reply, let move = Move(uci: uci), position.legalMoves().contains(move) else {
+                let why = EngineManager.shared.lastError
+                throw VisionError.invalidPosition(why.isEmpty ? "engine reply was not legal" : why)
+            }
+
+            let mover = position.board[move.from]?.type
+            let captured = position.board[move.to]?.type
+            let after = position.applying(move)
+            let suffix: HapticEngine.Suffix = after.legalMoves().isEmpty
+                ? .gameOver
+                : (after.isInCheck(after.sideToMove) ? .check : .none)
+            let text = SpeechEngine.shared.phrase(
+                for: seatMove(move),
+                piece: mover,
+                captured: captured,
+                suffix: suffix,
+                outcome: nil,
+                mirrored: seatFlipped
+            )
+
+            // Do not mutate the tracked ChessGame here. This is a recovery path for
+            // a board that no longer matches its move history, so only announce the move.
+            lastEngineMove = move.uci
+            lastSpokenText = text
+            recommendedMoveText = seatText(move.uci).uppercased()
+            scanStatus = "Move found from photographed position."
+            status = "Play \(seatText(move.uci)) as \(playerColor.name) (from the photographed board)."
+            deliver(move: move, suffix: suffix, spoken: text)
+        } catch {
+            scanFailed(error)
+        }
+    }
+
+    private func scanFailed(_ error: Error) {
+        scanStatus = "Scan failed: \(error.localizedDescription)"
+        status = scanStatus
+        HapticEngine.shared.error()
+        if SpeechEngine.shared.enabled {
+            SpeechEngine.shared.speak((error as? VisionError)?.spoken ?? "Scan failed.")
+        }
     }
 }

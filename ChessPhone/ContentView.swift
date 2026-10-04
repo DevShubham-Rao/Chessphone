@@ -3,6 +3,7 @@ import MediaPlayer
 
 struct ContentView: View {
     @StateObject private var vm = ChessPhoneViewModel()
+    @ObservedObject private var vision = VisionCoordinator.shared
     @State private var showingSettings = false
     @State private var showingPractice = false
 
@@ -14,8 +15,8 @@ struct ContentView: View {
 
             if vm.phase == .selectSide { sideSelection } else { gameScreen }
         }
-        .onAppear { vm.startInputs() }
-        .onDisappear { vm.stopInputs() }
+        .onAppear { vm.startInputs(); vision.warmUp() }
+        .onDisappear { vm.stopInputs(); vision.shutdown() }
         .sheet(isPresented: $showingSettings) { HapticSettingsView() }
         .fullScreenCover(isPresented: $showingPractice) { PracticeView() }
     }
@@ -135,7 +136,15 @@ struct ContentView: View {
                     .foregroundColor(vm.engineStatus.contains("FAILED") ? .red : .secondary)
                     .multilineTextAlignment(.center).padding(.horizontal)
 
-                Text("Vol up = count • Vol down = confirm • Shake = replay the engine recommendation")
+                if vision.enabled && !vm.scanStatus.isEmpty {
+                    Text(vm.scanStatus)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+
+                Text(vision.enabled ? "Vision ON: Vol up = scan board • Shake = replay recommendation" : "Vol up = count • Vol down = confirm • Shake = replay the engine recommendation")
                     .font(.caption2).foregroundColor(.secondary)
                     .multilineTextAlignment(.center).padding(.horizontal)
             }.padding(.vertical, 8)
