@@ -11,11 +11,11 @@ struct GeminiBoardReading: Decodable {
 }
 
 struct GeminiBoardReader {
-    /// Required model for this feature. As of October 2026 the stable 2.5 Flash model
-    /// is still served, although Google limits new-project access to some 2.5 models.
-    static var model = "gemini-2.5-flash"
-    /// 0 = no "thinking" (fastest, ~1-2 s). If misreads are common, try 512-1024 (slower but more careful).
-    static var thinkingBudget = 0
+    /// Gemini 3.8 Flash is the production model used for board recognition.
+    static var model = "gemini-3.8-flash"
+    /// Gemini 3.8 uses thinking levels instead of thinking budgets.
+    /// "low" minimizes latency while keeping enough reasoning for board recognition.
+    static var thinkingLevel = "low"
 
     private static let prompt = """
     This is a photo of a physical chessboard with pieces on it, taken by a player looking at the board; \
@@ -65,10 +65,9 @@ struct GeminiBoardReader {
                 ]
             ]],
             "generationConfig": [
-                "temperature": 0,
                 "responseMimeType": "application/json",
                 "responseSchema": Self.schema,
-                "thinkingConfig": ["thinkingBudget": Self.thinkingBudget]
+                "thinkingConfig": ["thinkingLevel": Self.thinkingLevel]
             ]
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)

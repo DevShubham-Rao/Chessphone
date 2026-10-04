@@ -8,7 +8,7 @@
 → `VisionCoordinator`
 → `GlassesCameraSource` (Meta DAT) or `PhoneCameraSource`
 → `ImagePreprocessor` (max 1024 px, JPEG)
-→ `GeminiBoardReader` (`gemini-2.5-flash`, structured JSON)
+→ `GeminiBoardReader` (`gemini-3.8-flash`, structured JSON)
 → `BoardOrienter` / `ScanMatcher`
 → legal `Position.fen`
 → `EngineManager` / Stockfish

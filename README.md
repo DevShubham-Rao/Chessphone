@@ -4,7 +4,7 @@ ChessPhone is an iOS chess assistant that combines:
 
 - Ray-Ban Meta camera capture through Meta Wearables Device Access Toolkit (DAT) 1.0.0
 - iPhone camera fallback for testing
-- Gemini 2.5 Flash vision parsing
+- Gemini 3.8 Flash vision parsing
 - Stockfish through `chesskit-engine`
 - Spoken and/or haptic move output
 - Existing manual volume-button move entry, takebacks, saves, skill level, and depth controls
@@ -16,7 +16,7 @@ When **Board scanning** is enabled and the app is waiting for the opponent's mov
 1. Press **Volume Up** on the iPhone.
 2. The active image source captures the board.
 3. The image is normalized and JPEG-compressed to at most **1024 px on its longest edge**.
-4. The JPEG is sent to **`gemini-2.5-flash`** with a strict JSON response schema.
+4. The JPEG is sent to **`gemini-3.8-flash`** with a strict JSON response schema.
 5. The app converts Gemini's camera-relative 8x8 rows into true chess coordinates.
 6. The scan is compared with the app's tracked legal position.
    - If exactly one legal opponent move explains the photo, that move is committed normally.
@@ -100,7 +100,7 @@ Because it is volume-state observation rather than a formal button-event API, te
 - `ChessPhone/BoardImageSource.swift`: image-source protocol + iPhone fallback
 - `ChessPhone/ImagePreprocessor.swift`: 1024 px JPEG normalization
 - `ChessPhone/GeminiKeyProvider.swift`: Keychain/plist/environment key loading
-- `ChessPhone/GeminiBoardReader.swift`: Gemini 2.5 Flash structured vision request
+- `ChessPhone/GeminiBoardReader.swift`: Gemini 3.8 Flash structured vision request
 - `ChessPhone/BoardPosition.swift`: orientation, sanity checks, scan-to-move matching, FEN-ready position
 - `ChessPhone/VisionCoordinator.swift`: capture → compress → Gemini orchestration + settings UI
 - `ChessPhone/GameState.swift`: Volume Up trigger and scan → Stockfish integration
