@@ -1,0 +1,122 @@
+// =====================================================================================
+// Edits to ChessPhone/GameState.swift  (the ONLY existing file with real logic changes)
+// These must live in GameState.swift because they use ChessPhoneViewModel's private members.
+// =====================================================================================
+
+// ---- 1) Inside `final class ChessPhoneViewModel`, next to the other stored properties ----
+@Published private(set) var scanStatus: String = ""
+private var scanTask: Task<Void, Never>?
+
+
+// ---- 2) At the very top of `func handleVolumeUp()` (everything below it stays as is) ----
+// Scan only while waiting for the opponent's move and nothing is half-typed, so manual entry still works.
+if VisionCoordinator.shared.enabled, phase == .opponentSourceColumn, tapCount == 0 {
+    requestBoardScan()
+    return
+}
+
+
+// ---- 3) Append at the END of GameState.swift ----
+extension ChessPhoneViewModel {
+
+    /// Volume Up in vision mode. Ignores presses while a scan is already running.
+    func requestBoardScan() {
+        guard scanTask == nil else { return }
+        HapticEngine.shared.tick()                       // instant "shutter" feedback
+        status = "Scanning the board..."
+        let generation = gameGeneration
+        scanTask = Task { [weak self] in
+            await self?.runBoardScan(generation: generation)
+            self?.scanTask = nil
+        }
+    }
+
+    private func runBoardScan(generation: Int) async {
+        do {
+            let scan = try await VisionCoordinator.shared.captureAndRead(playerColor: playerColor)
+            guard generation == gameGeneration else { return }   // new game / takeback happened meanwhile
+
+            switch ScanMatcher.match(scan, against: game.position) {
+            case .move(let move):
+                // Exactly one legal opponent move explains the photo: same as typing it in by hand.
+                commitOpponentMove(move)                 // validates, autosaves, asks Stockfish, speaks/vibrates
+            case .unchanged:
+                status = "The board hasn't changed. Play the recommended move, let your opponent reply, then scan again."
+                handleShakeRepeat()                      // replay the last recommendation
+            case .noMatch:
+                await recommendFromScan(scan, generation: generation)
+            }
+        } catch {
+            guard generation == gameGeneration else { return }
+            scanFailed(error)
+        }
+    }
+
+    /// Photo doesn't match the tracked game (misread, or the real board drifted): trust the photo,
+    /// build a FEN from it and ask Stockfish directly. The tracked game is left untouched.
+    private func recommendFromScan(_ scan: ScannedBoard, generation: Int) async {
+        do {
+            let position = try scan.makePosition(sideToMove: playerColor, rightsFrom: game.position)
+            status = "The board doesn't match the game so far - recommending from the photo..."
+
+            let reply = await EngineManager.shared.bestMove(fen: position.fen,
+                                                            depth: searchDepth, skillLevel: skillLevel)
+            guard generation == gameGeneration else { return }
+            guard let uci = reply, let move = Move(uci: uci), position.legalMoves().contains(move) else {
+                let why = EngineManager.shared.lastError
+                throw VisionError.invalidPosition(why.isEmpty ? "engine reply was not legal" : why)
+            }
+
+            let after = position.applying(move)
+            let suffix: HapticEngine.Suffix = after.legalMoves().isEmpty
+                ? .gameOver : (after.isInCheck(after.sideToMove) ? .check : .none)
+            let text = SpeechEngine.shared.phrase(for: seatMove(move),
+                                                  piece: position.board[move.from]?.type,
+                                                  captured: position.board[move.to]?.type,
+                                                  suffix: suffix, outcome: nil, mirrored: seatFlipped)
+
+            lastMove = move
+            lastEngineMove = move.uci
+            lastSpokenText = text
+            recommendedMoveText = seatText(move.uci).uppercased()
+            status = "Play \(seatText(move.uci)) as \(playerColor.name) (from the photo)."
+            deliver(move: move, suffix: suffix, spoken: text)   // honours your speech/vibration settings
+        } catch {
+            scanFailed(error)
+        }
+    }
+
+    private func scanFailed(_ error: Error) {
+        status = "Scan failed: \(error.localizedDescription)"
+        HapticEngine.shared.error()
+        if SpeechEngine.shared.enabled {
+            SpeechEngine.shared.speak((error as? VisionError)?.spoken ?? "Scan failed.")
+        }
+    }
+}
+
+
+// =====================================================================================
+// ChessPhoneApp.swift  (3 small lines)
+// =====================================================================================
+@main
+struct ChessPhoneApp: App {
+    init() { GlassesSetup.configure() }                          // NEW
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .onOpenURL { GlassesSetup.handle(url: $0) }      // NEW: Meta AI app returns here after approval
+        }
+    }
+}
+
+// =====================================================================================
+// ContentView.swift  (2 lines, next to the existing startInputs()/stopInputs())
+// =====================================================================================
+//   .onAppear    { vm.startInputs(); VisionCoordinator.shared.warmUp() }
+//   .onDisappear { vm.stopInputs();  VisionCoordinator.shared.shutdown() }
+
+// =====================================================================================
+// HapticSettingsView.swift  (1 line, inside the existing List)
+// =====================================================================================
+//   VisionSettingsSection()
