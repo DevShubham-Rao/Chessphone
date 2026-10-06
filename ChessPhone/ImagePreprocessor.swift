@@ -1,10 +1,10 @@
 import UIKit
 
 /// Shrinks a photo so the longest edge is at most `maxEdge` pixels and encodes it as JPEG.
-/// Smaller upload = lower latency on cellular, and a chessboard stays perfectly readable at 1024 px.
+/// Smaller upload = lower latency on cellular, and a chessboard stays readable at this size while uploads are noticeably smaller.
 enum ImagePreprocessor {
-    static var maxEdge: CGFloat = 1024
-    static var jpegQuality: CGFloat = 0.8
+    static var maxEdge: CGFloat = 896
+    static var jpegQuality: CGFloat = 0.72
 
     static func jpegData(from image: UIImage) throws -> Data {
         // UIImage.size is in points; convert to real pixels first.

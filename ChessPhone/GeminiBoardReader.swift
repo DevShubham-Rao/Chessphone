@@ -11,36 +11,25 @@ struct GeminiBoardReading: Decodable {
 }
 
 struct GeminiBoardReader {
-    /// One API key can be used with multiple Gemini models, as long as the Google AI project
-    /// behind that key has access to them. We prefer 2.5 Flash for this chess-board workload,
-    /// then automatically fall back to other current Flash models if a model is unavailable,
-    /// rate-limited, or temporarily overloaded.
+    /// Keep the fallback list deliberately short. A long chain made one scan wait through
+    /// many overloaded/unavailable models. The user's key targets Gemini 2.5 Flash.
     private static let models = [
         "gemini-2.5-flash",
-        "gemini-3.8-flash",
-        "gemini-3.7-flash",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite"
+        "gemini-2.5-flash-lite"
     ]
 
-    /// Low thinking keeps board recognition responsive. Current Gemini 2.5/3.x Flash models
-    /// support thinking levels, so the same request shape can be reused across the fallback list.
-    private static let thinkingLevel = "low"
+    /// Gemini 2.5 Flash supports thinkingBudget=0, which is ideal for fast visual transcription.
+    private static let thinkingBudget = 0
 
-    /// Number of retries on a single model after transient errors such as 429 or 503.
-    /// After these retries, the reader moves to the next model automatically.
-    private static let retriesPerModel = 2
+    /// One retry total per transiently failing model, then move on quickly.
+    private static let retriesPerModel = 1
 
     private static let prompt = """
-    This is a photo of a physical chessboard with pieces on it, taken by a player looking at the board; \
-    it may be at an angle. Report the position as exactly 8 strings, one per board row, listed from the row \
-    FARTHEST from the camera to the row NEAREST the camera. Inside each row go from the LEFT of the image to the RIGHT. \
-    Use exactly 8 characters per row: P N B R Q K for white pieces, p n b r q k for black pieces, and . for an empty square. \
-    Decide white vs black by the piece's own colour (light vs dark), never by where it stands. \
-    Report exactly what is on the board; do not assume a starting or legal position. \
-    If a hand or object hides a square, give your best guess and lower the confidence. \
-    If a complete 8x8 board is not visible, set boardVisible to false and return eight rows of "........".
+    Read this physical chessboard photo. Return exactly 8 rows from FARTHEST to NEAREST to the camera,
+    and within each row LEFT to RIGHT in the image. Each row must contain exactly 8 characters.
+    Use PNBRQK for white pieces, pnbrqk for black pieces, and . for empty squares.
+    Use each piece's actual light/dark color; do not assume a legal or starting position.
+    If the full 8x8 board is not visible, set boardVisible=false and return eight rows of ........
     """
 
     private static let schema: [String: Any] = [
@@ -56,9 +45,9 @@ struct GeminiBoardReader {
     ]
 
     private let urlSession: URLSession = {
-        let config = URLSessionConfiguration.ephemeral  // no on-disk cache of photos
-        config.timeoutIntervalForRequest = 25
-        config.timeoutIntervalForResource = 45
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForResource = 18
         return URLSession(configuration: config)
     }()
 
@@ -73,36 +62,30 @@ struct GeminiBoardReader {
                 } catch let error as VisionError {
                     lastFailure = error
 
-                    guard case let .http(status, message) = error else {
-                        // A valid Gemini response that we could not decode is unlikely to be fixed
-                        // by hammering other models. Return the useful error immediately.
-                        throw error
-                    }
-
-                    if Self.isAuthenticationFailure(status: status) {
-                        // Bad/disabled key or project-level permission problem. Another model will
-                        // not fix this, so fail immediately with the real server message.
-                        throw error
-                    }
+                    guard case let .http(status, message) = error else { throw error }
+                    if Self.isAuthenticationFailure(status: status) { throw error }
 
                     if Self.isUnavailableModel(status: status, message: message) {
-                        // This model is not available to this API key/project. Try the next one.
                         break
                     }
 
                     if Self.isTransient(status: status) {
                         if attempt < Self.retriesPerModel {
-                            try await Self.backoff(afterAttempt: attempt)
+                            try await Self.backoff()
                             continue
                         }
-
-                        // This model stayed busy/rate-limited after retries. Try another Flash model.
                         break
                     }
 
-                    // 400 and other non-transient request errors usually indicate a real request
-                    // problem rather than temporary model load, so don't hide them with fallbacks.
                     throw error
+                } catch is URLError {
+                    // Network timeouts should not make a scan sit for nearly a minute.
+                    lastFailure = .emptyResponse
+                    if attempt < Self.retriesPerModel {
+                        try await Self.backoff()
+                        continue
+                    }
+                    break
                 }
             }
         }
@@ -118,7 +101,7 @@ struct GeminiBoardReader {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key") // header keeps key out of URLs/logs
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
 
         let body: [String: Any] = [
             "contents": [[
@@ -130,7 +113,7 @@ struct GeminiBoardReader {
             "generationConfig": [
                 "responseMimeType": "application/json",
                 "responseSchema": Self.schema,
-                "thinkingConfig": ["thinkingLevel": Self.thinkingLevel]
+                "thinkingConfig": ["thinkingBudget": Self.thinkingBudget]
             ]
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -152,9 +135,7 @@ struct GeminiBoardReader {
 
         let envelope = try JSONDecoder().decode(Envelope.self, from: data)
         let text = envelope.candidates?.first?.content?.parts?.compactMap(\.text).joined() ?? ""
-        guard !text.isEmpty else {
-            throw VisionError.emptyResponse
-        }
+        guard !text.isEmpty else { throw VisionError.emptyResponse }
 
         do {
             return try JSONDecoder().decode(GeminiBoardReading.self, from: Data(text.utf8))
@@ -173,21 +154,14 @@ struct GeminiBoardReader {
 
     private static func isUnavailableModel(status: Int, message: String) -> Bool {
         if status == 404 { return true }
-
-        // A 403 can sometimes be model-specific rather than a bad key. Only fall back when the
-        // server message clearly talks about model access/availability. Other 403s are surfaced.
         guard status == 403 else { return false }
         let lower = message.lowercased()
         return lower.contains("model") &&
                (lower.contains("access") || lower.contains("available") || lower.contains("permission"))
     }
 
-    private static func backoff(afterAttempt attempt: Int) async throws {
-        // About 0.8s, then 1.6s, with a small random jitter so retries do not all land together.
-        let baseMilliseconds = 800 * (1 << attempt)
-        let jitterMilliseconds = Int.random(in: 0...250)
-        let total = baseMilliseconds + jitterMilliseconds
-        try await Task.sleep(nanoseconds: UInt64(total) * 1_000_000)
+    private static func backoff() async throws {
+        try await Task.sleep(nanoseconds: 350_000_000)
     }
 
     private static func apiMessage(from data: Data) -> String {

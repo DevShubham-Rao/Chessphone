@@ -41,7 +41,15 @@ final class PhoneCameraSource: NSObject, BoardImageSource, AVCapturePhotoCapture
         if !session.isRunning {
             let session = self.session
             DispatchQueue.global(qos: .userInitiated).async { session.startRunning() }
-            try? await Task.sleep(nanoseconds: 600_000_000)   // let exposure / focus settle
+
+            // Do not impose a fixed 0.6 s delay on every cold start. Usually the session
+            // becomes live much sooner; give it a short settle only after it is actually running.
+            let deadline = Date().addingTimeInterval(1.5)
+            while !session.isRunning && Date() < deadline {
+                try await Task.sleep(nanoseconds: 40_000_000)
+            }
+            guard session.isRunning else { throw VisionError.cameraDenied }
+            try await Task.sleep(nanoseconds: 120_000_000)
         }
     }
 

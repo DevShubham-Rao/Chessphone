@@ -6,6 +6,7 @@ enum VisionError: LocalizedError {
     case cameraDenied
     case glassesPermissionDenied
     case glassesUnavailable
+    case glassesNoEligibleDevice
     case sdkNotLinked
     case captureTimeout
     case captureBusy
@@ -23,6 +24,7 @@ enum VisionError: LocalizedError {
         case .cameraDenied: return "Camera permission was denied."
         case .glassesPermissionDenied: return "The glasses camera permission was not granted in the Meta AI app."
         case .glassesUnavailable: return "Could not start a session with the glasses (are they on, connected and unfolded?)."
+        case .glassesNoEligibleDevice: return "No eligible Ray-Ban device is available yet. Open/unfold the glasses, make sure they are connected in Meta AI, and reconnect this app if needed."
         case .sdkNotLinked: return "Meta Wearables SDK is not linked into this build."
         case .captureTimeout: return "The camera did not deliver a photo in time."
         case .captureBusy: return "The glasses camera is already handling another capture."
@@ -41,7 +43,7 @@ enum VisionError: LocalizedError {
         switch self {
         case .missingAPIKey: return "No API key."
         case .cameraDenied, .glassesPermissionDenied: return "Camera permission needed."
-        case .glassesUnavailable, .sdkNotLinked: return "Glasses not available."
+        case .glassesUnavailable, .glassesNoEligibleDevice, .sdkNotLinked: return "Glasses not connected. Check Meta AI."
         case .captureTimeout, .captureBusy, .imageEncodingFailed: return "Photo failed. Try again."
         case .http, .emptyResponse: return "Vision service failed. Try again."
         case .boardNotVisible: return "I can't see the whole board."

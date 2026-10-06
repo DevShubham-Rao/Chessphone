@@ -57,7 +57,16 @@ final class VisionCoordinator: ObservableObject {
     /// Start the camera/session ahead of time so the button press only has to take the photo.
     func warmUp() {
         guard enabled else { return }
-        Task { try? await source.prepare() }
+        Task {
+            do {
+                try await source.prepare()
+                if case .failed(_) = stage { stage = .idle }
+            } catch {
+                // Surface warm-up failures instead of silently discarding them. A later scan
+                // still calls prepare() again, so reconnecting the glasses can recover normally.
+                stage = .failed(error.localizedDescription)
+            }
+        }
     }
 
     func shutdown() {
@@ -71,7 +80,7 @@ final class VisionCoordinator: ObservableObject {
             let image = try await source.captureImage()
 
             stage = .reading
-            let jpeg = try ImagePreprocessor.jpegData(from: image)       // <= 1024 px longest edge
+            let jpeg = try ImagePreprocessor.jpegData(from: image)       // optimized before upload
             let reading = try await reader.readBoard(jpeg: jpeg)
             let board = try BoardOrienter.orient(reading, playerColor: playerColor)
 

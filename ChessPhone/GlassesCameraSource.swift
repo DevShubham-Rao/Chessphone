@@ -41,6 +41,7 @@ enum GlassesSetup {
 
 @MainActor
 final class GlassesCameraSource: BoardImageSource {
+    private var deviceSelector: AutoDeviceSelector?
     private var session: DeviceSession?
     private var stopCamera: (() -> Void)?
     private var requestPhoto: (() -> Bool)?
@@ -57,39 +58,49 @@ final class GlassesCameraSource: BoardImageSource {
         teardown()
 
         let wearables = Wearables.shared
-        var permission = try await wearables.checkPermissionStatus(.camera)
-        if permission != .granted {
-            permission = try await wearables.requestPermission(.camera)
-        }
-        guard permission == .granted else {
-            throw VisionError.glassesPermissionDenied
-        }
 
-        let newSession = try wearables.createSession(
-            deviceSelector: AutoDeviceSelector(wearables: wearables)
-        )
+        // AutoDeviceSelector can exist before the glasses finish reconnecting. Meta's DAT docs
+        // recommend waiting for an active device before createSession(); otherwise it can throw
+        // DeviceSessionError.noEligibleDevice even though the glasses become available moments later.
+        let selector = AutoDeviceSelector(wearables: wearables)
+        deviceSelector = selector
 
-        let states = newSession.stateStream()
-        sessionWatcher = Task { [weak self] in
-            for await state in states {
-                await MainActor.run {
-                    self?.sessionStarted = (state == .started)
-                }
-            }
-            await MainActor.run { self?.sessionStarted = false }
-        }
-
-        try newSession.start()
-        guard await waitUntil(8, { sessionStarted }) else {
+        guard await waitUntil(4.0, { selector.activeDevice != nil }) else {
             teardown()
-            throw VisionError.glassesUnavailable
+            throw VisionError.glassesNoEligibleDevice
+        }
+
+        do {
+            var permission = try await wearables.checkPermissionStatus(.camera)
+            if permission != .granted {
+                permission = try await wearables.requestPermission(.camera)
+            }
+            guard permission == .granted else {
+                throw VisionError.glassesPermissionDenied
+            }
+        } catch {
+            if Self.isNoEligibleDevice(error) {
+                teardown()
+                throw VisionError.glassesNoEligibleDevice
+            }
+            throw error
+        }
+
+        let newSession: DeviceSession
+        do {
+            newSession = try await createAndStartSession(selector: selector)
+        } catch {
+            teardown()
+            if Self.isNoEligibleDevice(error) {
+                throw VisionError.glassesNoEligibleDevice
+            }
+            throw error
         }
         session = newSession
 
-        // The preview exists only to keep a camera stream available for still capture.
-        // A low frame rate leaves bandwidth for the JPEG transfer while high resolution
-        // keeps enough detail for small chess pieces.
-        let config = StreamConfiguration(videoCodec: .raw, resolution: .high, frameRate: 2)
+        // Medium + low frame rate is enough to keep still capture available while reducing
+        // Bluetooth bandwidth/latency compared with a constantly-running high-res preview.
+        let config = StreamConfiguration(videoCodec: .raw, resolution: .medium, frameRate: 2)
         guard let camera = try newSession.addCamera(config: config) else {
             teardown()
             throw VisionError.glassesUnavailable
@@ -112,10 +123,12 @@ final class GlassesCameraSource: BoardImageSource {
 
         tokens.append(stream.errorPublisher.listen { [weak self] error in
             Task { @MainActor in
-                guard let self, self.photoContinuation != nil else { return }
-                let id = self.captureID
-                self.resolvePhoto(.failure(error), id: id)
-                self.teardown()
+                guard let self else { return }
+                if self.photoContinuation != nil {
+                    let id = self.captureID
+                    self.resolvePhoto(.failure(error), id: id)
+                }
+                self.streamLive = false
             }
         })
 
@@ -123,13 +136,15 @@ final class GlassesCameraSource: BoardImageSource {
         requestPhoto = { stream.capturePhoto(format: .jpeg) }
         stream.start()
 
-        guard await waitUntil(10, { streamLive }) else {
+        guard await waitUntil(6.0, { streamLive }) else {
             teardown()
             throw VisionError.glassesUnavailable
         }
     }
 
     func captureImage() async throws -> UIImage {
+        // The normal path returns immediately because warmUp() has already prepared the stream.
+        // If the glasses disconnected/folded, prepare() performs one clean reconnect attempt.
         try await prepare()
         guard let requestPhoto else { throw VisionError.glassesUnavailable }
         guard photoContinuation == nil else { throw VisionError.captureBusy }
@@ -142,17 +157,14 @@ final class GlassesCameraSource: BoardImageSource {
             guard requestPhoto() else {
                 photoContinuation = nil
                 continuation.resume(throwing: VisionError.captureBusy)
-                teardown()
                 return
             }
 
             Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
                 await MainActor.run {
                     guard let self, self.photoContinuation != nil else { return }
                     self.resolvePhoto(.failure(VisionError.captureTimeout), id: id)
-                    // Reset the stream so a very late photo from the timed-out capture
-                    // cannot be mistaken for a future capture.
                     self.teardown()
                 }
             }
@@ -166,6 +178,49 @@ final class GlassesCameraSource: BoardImageSource {
 
     func shutdown() {
         teardown()
+    }
+
+    private func createAndStartSession(selector: AutoDeviceSelector) async throws -> DeviceSession {
+        let wearables = Wearables.shared
+        var lastError: Error?
+
+        // One quick retry handles the common case where the selector/device becomes eligible
+        // during the transition into a session. Do not loop for many seconds.
+        for attempt in 0..<2 {
+            do {
+                let newSession = try wearables.createSession(deviceSelector: selector)
+                sessionStarted = false
+
+                let states = newSession.stateStream()
+                sessionWatcher?.cancel()
+                sessionWatcher = Task { [weak self] in
+                    for await state in states {
+                        await MainActor.run {
+                            self?.sessionStarted = (state == .started)
+                        }
+                    }
+                    await MainActor.run { self?.sessionStarted = false }
+                }
+
+                try newSession.start()
+                guard await waitUntil(5.0, { sessionStarted }) else {
+                    newSession.stop()
+                    throw VisionError.glassesUnavailable
+                }
+                return newSession
+            } catch {
+                lastError = error
+                sessionWatcher?.cancel()
+                sessionWatcher = nil
+                sessionStarted = false
+
+                guard attempt == 0, Self.isNoEligibleDevice(error) else { throw error }
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                guard selector.activeDevice != nil else { throw VisionError.glassesNoEligibleDevice }
+            }
+        }
+
+        throw lastError ?? VisionError.glassesUnavailable
     }
 
     private func resolvePhoto(_ result: Result<Data, Error>, id: Int) {
@@ -187,6 +242,7 @@ final class GlassesCameraSource: BoardImageSource {
         stopCamera = nil
         requestPhoto = nil
         session = nil
+        deviceSelector = nil
         sessionStarted = false
         streamLive = false
     }
@@ -195,9 +251,14 @@ final class GlassesCameraSource: BoardImageSource {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if condition() { return true }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            try? await Task.sleep(nanoseconds: 80_000_000)
         }
         return condition()
+    }
+
+    private static func isNoEligibleDevice(_ error: Error) -> Bool {
+        let text = String(describing: error).lowercased() + " " + error.localizedDescription.lowercased()
+        return text.contains("noeligibledevice") || text.contains("no eligible device")
     }
 }
 
