@@ -11,15 +11,16 @@ struct GeminiBoardReading: Decodable {
 }
 
 struct GeminiBoardReader {
-    /// Keep the fallback list deliberately short. A long chain made one scan wait through
-    /// many overloaded/unavailable models. The user's key targets Gemini 2.5 Flash.
+    /// Keep the fallback list deliberately short so a scan does not wait through many models.
+    /// Gemini 3.5 Flash-Lite is the fast primary model; 3.5 Flash is the fallback.
     private static let models = [
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite"
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash"
     ]
 
-    /// Gemini 2.5 Flash supports thinkingBudget=0, which is ideal for fast visual transcription.
-    private static let thinkingBudget = 0
+    /// Gemini 3.x uses thinkingLevel instead of the legacy numeric thinkingBudget.
+    /// Minimal keeps this visual transcription request as fast as possible.
+    private static let thinkingLevel = "minimal"
 
     /// One retry total per transiently failing model, then move on quickly.
     private static let retriesPerModel = 1
@@ -113,7 +114,7 @@ struct GeminiBoardReader {
             "generationConfig": [
                 "responseMimeType": "application/json",
                 "responseSchema": Self.schema,
-                "thinkingConfig": ["thinkingBudget": Self.thinkingBudget]
+                "thinkingConfig": ["thinkingLevel": Self.thinkingLevel]
             ]
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
