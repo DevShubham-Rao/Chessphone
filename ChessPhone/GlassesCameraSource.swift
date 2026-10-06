@@ -50,6 +50,8 @@ final class GlassesCameraSource: BoardImageSource {
 
     private var sessionStarted = false
     private var streamLive = false
+    private var latestFrame: UIImage?
+    private var latestFrameDate: Date?
     private var captureID = 0
     private var photoContinuation: CheckedContinuation<Data, Error>?
 
@@ -113,6 +115,16 @@ final class GlassesCameraSource: BoardImageSource {
             }
         })
 
+        // Keep the newest live frame available. For board scanning this is both faster and
+        // more reliable than waiting for a separate still-photo transfer over Bluetooth.
+        tokens.append(stream.videoFramePublisher.listen { [weak self] frame in
+            guard let image = frame.makeUIImage() else { return }
+            Task { @MainActor in
+                self?.latestFrame = image
+                self?.latestFrameDate = Date()
+            }
+        })
+
         tokens.append(stream.photoDataPublisher.listen { [weak self] photo in
             let data = photo.data
             Task { @MainActor in
@@ -143,9 +155,26 @@ final class GlassesCameraSource: BoardImageSource {
     }
 
     func captureImage() async throws -> UIImage {
-        // The normal path returns immediately because warmUp() has already prepared the stream.
-        // If the glasses disconnected/folded, prepare() performs one clean reconnect attempt.
+        // The normal path returns almost immediately from the live stream. A medium-resolution
+        // preview frame is plenty for Gemini to read a chessboard and avoids waiting on the
+        // separate still-photo Bluetooth transfer, which can occasionally never publish data.
         try await prepare()
+
+        if let image = freshLiveFrame(maxAge: 0.9) {
+            return image
+        }
+
+        // If warm-up has only just finished, allow a brief moment for the first fresh frame.
+        let frameDeadline = Date().addingTimeInterval(1.5)
+        while Date() < frameDeadline {
+            if let image = freshLiveFrame(maxAge: 1.0) {
+                return image
+            }
+            try? await Task.sleep(nanoseconds: 60_000_000)
+        }
+
+        // Fallback: request a real still image. Keep this bounded, and if a video frame arrives
+        // while the still is transferring use that instead of making the user wait.
         guard let requestPhoto else { throw VisionError.glassesUnavailable }
         guard photoContinuation == nil else { throw VisionError.captureBusy }
 
@@ -161,11 +190,16 @@ final class GlassesCameraSource: BoardImageSource {
             }
 
             Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                // Give still capture a short chance, then fall back to the newest stream frame.
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
                 await MainActor.run {
                     guard let self, self.photoContinuation != nil else { return }
-                    self.resolvePhoto(.failure(VisionError.captureTimeout), id: id)
-                    self.teardown()
+                    if let image = self.freshLiveFrame(maxAge: 2.0),
+                       let jpeg = image.jpegData(compressionQuality: 0.9) {
+                        self.resolvePhoto(.success(jpeg), id: id)
+                    } else {
+                        self.resolvePhoto(.failure(VisionError.captureTimeout), id: id)
+                    }
                 }
             }
         }
@@ -173,6 +207,12 @@ final class GlassesCameraSource: BoardImageSource {
         guard let image = UIImage(data: data) else {
             throw VisionError.imageEncodingFailed
         }
+        return image
+    }
+
+    private func freshLiveFrame(maxAge: TimeInterval) -> UIImage? {
+        guard let image = latestFrame, let date = latestFrameDate,
+              Date().timeIntervalSince(date) <= maxAge else { return nil }
         return image
     }
 
@@ -245,6 +285,8 @@ final class GlassesCameraSource: BoardImageSource {
         deviceSelector = nil
         sessionStarted = false
         streamLive = false
+        latestFrame = nil
+        latestFrameDate = nil
     }
 
     private func waitUntil(_ seconds: Double, _ condition: () -> Bool) async -> Bool {
