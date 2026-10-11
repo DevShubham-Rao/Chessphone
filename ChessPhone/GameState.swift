@@ -192,10 +192,10 @@ final class ChessPhoneViewModel: ObservableObject {
 
     // MARK: - Hardware input
 
-    func handleVolumeUp() {
+    func handleVolumeUp(manual: Bool = false) {
         // In vision mode, the first Volume Up press while waiting for the opponent
         // is the shutter. Manual tap-entry remains available when vision mode is off.
-        if VisionCoordinator.shared.enabled, phase == .opponentSourceColumn, tapCount == 0 {
+        if !manual, VisionCoordinator.shared.enabled, phase == .opponentSourceColumn, tapCount == 0 {
             requestBoardScan()
             return
         }
@@ -204,8 +204,8 @@ final class ChessPhoneViewModel: ObservableObject {
         case .opponentSourceColumn, .opponentSourceRow, .opponentTargetColumn, .opponentTargetRow, .promotion:
             let limit = phase == .promotion ? 4 : 8
             if tapCount >= limit {
-                HapticEngine.shared.error()
                 status = "Maximum is \(limit)."
+                HapticEngine.shared.error(status)
                 return
             }
             tapCount += 1
@@ -446,7 +446,7 @@ final class ChessPhoneViewModel: ObservableObject {
     /// Bad input for the current step: buzz, explain, stay on the same step.
     private func reject(_ message: String) {
         status = message
-        HapticEngine.shared.error()
+        HapticEngine.shared.error(message)
     }
 
     // MARK: - Engine recommendation flow
@@ -627,7 +627,7 @@ final class ChessPhoneViewModel: ObservableObject {
         promotionCandidates = []
         tapCount = 0
         status = message
-        HapticEngine.shared.error()
+        HapticEngine.shared.error(message)
     }
 
     private func finishGame(_ outcome: GameOutcome) {

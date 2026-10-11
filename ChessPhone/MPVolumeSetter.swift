@@ -1,23 +1,34 @@
 import MediaPlayer
 import UIKit
 
-/// Drives the hidden MPVolumeView's slider to programmatically set system
-/// volume - the standard (if hacky) trick behind volume-button capture on iOS.
+/// Uses the mounted MPVolumeView control rather than a detached slider.
 enum MPVolumeSetter {
-    static weak var volumeView: MPVolumeView?
+    private final class WeakView {
+        weak var view: MPVolumeView?
+        init(_ view: MPVolumeView) { self.view = view }
+    }
+    private static var views: [WeakView] = []
+    static var volumeView: MPVolumeView? {
+        get { views.reversed().compactMap { $0.view }.first { $0.window != nil } }
+        set {
+            views.removeAll { $0.view == nil || $0.view === newValue }
+            if let newValue { views.append(WeakView(newValue)) }
+        }
+    }
 
-    static func setVolume(_ value: Float) {
-        let apply = {
-            guard let slider = MPVolumeSetter.volumeView?.subviews.compactMap({ $0 as? UISlider }).first else {
-                print("ChessPhone: hidden volume slider not found; volume buttons can't be captured.")
-                return
-            }
-            slider.value = value
+    @discardableResult
+    static func setVolume(_ value: Float) -> Bool {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { setVolume(value) }
+            return false
         }
-        if Thread.isMainThread {
-            apply()
-        } else {
-            DispatchQueue.main.async(execute: apply)
+        guard let view = volumeView, view.window != nil,
+              let slider = view.subviews.compactMap({ $0 as? UISlider }).first else {
+            return false
         }
+        slider.setValue(min(max(value, 0), 1), animated: false)
+        slider.sendActions(for: .valueChanged)
+        slider.sendActions(for: .touchUpInside)
+        return true
     }
 }

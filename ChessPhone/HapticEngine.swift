@@ -31,6 +31,7 @@ final class HapticEngine {
     private let heavy = UIImpactFeedbackGenerator(style: .heavy)
     private let notify = UINotificationFeedbackGenerator()
     private var playback: Task<Void, Never>?
+    private var errorPlayback: Task<Void, Never>?
 
     // Core Haptics is used for buzzes with a real length (e.g. "vibrate for 0.1 s").
     private let supportsCoreHaptics = CHHapticEngine.capabilitiesForHardware().supportsHaptics
@@ -49,9 +50,42 @@ final class HapticEngine {
         pattern = HapticPattern.load()
     }
 
-    func tick() { impact.impactOccurred() }
-    func confirm() { notify.notificationOccurred(.success) }
-    func error() { notify.notificationOccurred(.error) }
+    func tick() {
+        if errorPlayback != nil {
+            errorPlayback?.cancel()
+            errorPlayback = nil
+            try? activePlayer?.stop(atTime: CHHapticTimeImmediate)
+        }
+        guard !FeedbackSettings.shared.allOff, FeedbackSettings.shared.buttonsEnabled else { return }
+        impact.impactOccurred()
+    }
+    func confirm() {
+        if errorPlayback != nil {
+            errorPlayback?.cancel()
+            errorPlayback = nil
+            try? activePlayer?.stop(atTime: CHHapticTimeImmediate)
+        }
+        guard !FeedbackSettings.shared.allOff, FeedbackSettings.shared.buttonsEnabled else { return }
+        notify.notificationOccurred(.success)
+    }
+    func error(_ message: String = "Invalid move. Try again.") {
+        cancel()
+        let settings = FeedbackSettings.shared
+        if settings.speakErrors { SpeechEngine.shared.speak(message) }
+        guard !settings.allOff, settings.errorsEnabled else { return }
+        let duration = settings.errorDuration
+        let strength = settings.errorIntensity
+        let count = settings.errorCount
+        let gap = settings.errorGap
+        errorPlayback = Task { [weak self] in
+            guard let self else { return }
+            for i in 0..<count {
+                guard !Task.isCancelled else { return }
+                await self.vibrate(length: duration, intensity: strength)
+                if i + 1 < count { await self.pause(gap) }
+            }
+        }
+    }
 
     /// Plays e2 -> e4 (5,2 -> 5,4), optionally with a promotion signal.
     func testPattern(withPromotion: Bool = false) {
@@ -63,6 +97,10 @@ final class HapticEngine {
                   promotion: Int = 0, suffix: Suffix = .none,
                   onFinished: (@MainActor () -> Void)? = nil) {
         cancel()
+        guard !FeedbackSettings.shared.allOff, FeedbackSettings.shared.movesEnabled else {
+            onFinished?()
+            return
+        }
         let steps = pattern.steps
 
         playback = Task { [weak self] in
@@ -135,6 +173,7 @@ final class HapticEngine {
 
     func playGameOver() {
         cancel()
+        guard !FeedbackSettings.shared.allOff, FeedbackSettings.shared.movesEnabled else { return }
         playback = Task { [weak self] in
             guard let self else { return }
             await self.pulses(3, generator: self.heavy, gap: 0.5)
@@ -142,6 +181,8 @@ final class HapticEngine {
     }
 
     func cancel() {
+        errorPlayback?.cancel()
+        errorPlayback = nil
         playback?.cancel()
         playback = nil
         try? activePlayer?.stop(atTime: CHHapticTimeImmediate)
@@ -166,6 +207,7 @@ final class HapticEngine {
     /// One vibration. Lengths under ~0.05 s are a tap; longer ones are a continuous buzz.
     /// Returns when the vibration has finished.
     private func vibrate(length: Double, intensity: Double) async {
+        guard !Task.isCancelled, !FeedbackSettings.shared.allOff else { return }
         let level = Float(min(max(intensity, 0.1), 1.0))
 
         if length < 0.05 {

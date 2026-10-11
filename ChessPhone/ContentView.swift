@@ -16,7 +16,7 @@ struct ContentView: View {
             if vm.phase == .selectSide { sideSelection } else { gameScreen }
         }
         .onAppear { vm.startInputs(); vision.warmUp() }
-        .onDisappear { vm.stopInputs(); vision.shutdown() }
+        .onDisappear { vision.shutdown() }
         .sheet(isPresented: $showingSettings) { HapticSettingsView() }
         .fullScreenCover(isPresented: $showingPractice) { PracticeView() }
     }
@@ -131,6 +131,14 @@ struct ContentView: View {
                     Button("Retry engine") { vm.retryEngine() }.buttonStyle(.borderedProminent)
                 }
 
+                HStack(spacing: 12) {
+                    Button("Count") { vm.handleVolumeUp(manual: true) }
+                    Button("Confirm") { vm.handleVolumeDown() }
+                    Button("Replay") { vm.handleShakeRepeat() }
+                }
+                .buttonStyle(.bordered)
+                .accessibilityElement(children: .contain)
+
                 Text(vm.engineStatus)
                     .font(.caption)
                     .foregroundColor(vm.engineStatus.contains("FAILED") ? .red : .secondary)
@@ -157,7 +165,10 @@ struct VolumeViewContainer: UIViewRepresentable {
         let view = MPVolumeView(frame: .zero)
         view.showsRouteButton = false
         MPVolumeSetter.volumeView = view
+        DispatchQueue.main.async { VolumeButtonHandler.shared.reconnect() }
         return view
     }
-    func updateUIView(_ uiView: MPVolumeView, context: Context) {}
+    func updateUIView(_ uiView: MPVolumeView, context: Context) {
+        MPVolumeSetter.volumeView = uiView
+    }
 }

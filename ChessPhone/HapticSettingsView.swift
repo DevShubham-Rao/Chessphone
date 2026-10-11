@@ -6,14 +6,22 @@ struct HapticSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var pattern = HapticEngine.shared.pattern
     @ObservedObject private var speech = SpeechEngine.shared
+    @ObservedObject private var feedback = FeedbackSettings.shared
+    @State private var presetName = ""
+    @State private var renamingID: UUID?
+    @State private var renameText = ""
 
     var body: some View {
         NavigationStack {
             List {
+                vibrationControls
                 sequenceSection
-                Section("Presets") {
-                    Button("Load Easy preset (slow, default)") { pattern = .easy }
-                    Button("Load Fast preset") { pattern = .fast }
+                presetSection
+                errorSection
+                Section("Volume controls") {
+                    Button("Reconnect volume controls") { VolumeButtonHandler.shared.reconnect() }
+                    Text("Use Count, Confirm and Replay on the game screen if a hardware press is missed.")
+                        .font(.caption).foregroundColor(.secondary)
                 }
                 testSection
                 audioSection
@@ -32,9 +40,95 @@ struct HapticSettingsView: View {
                     }
                 }
             }
+            .alert("Rename preset", isPresented: Binding(
+                get: { renamingID != nil },
+                set: { if !$0 { renamingID = nil } }
+            )) {
+                TextField("Name", text: $renameText)
+                Button("Save") {
+                    let name = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !name.isEmpty, let id = renamingID,
+                       let index = feedback.presets.firstIndex(where: { $0.id == id }) {
+                        feedback.presets[index].name = name
+                    }
+                    renamingID = nil
+                }
+                Button("Cancel", role: .cancel) { renamingID = nil }
+            }
+            .onChange(of: feedback.allOff) { _ in HapticEngine.shared.cancel() }
+            .onChange(of: feedback.movesEnabled) { _ in HapticEngine.shared.cancel() }
+            .onChange(of: feedback.buttonsEnabled) { _ in HapticEngine.shared.cancel() }
+            .onChange(of: feedback.errorsEnabled) { _ in HapticEngine.shared.cancel() }
             .onChange(of: pattern) { newValue in
                 HapticEngine.shared.pattern = newValue
             }
+        }
+    }
+
+    private var vibrationControls: some View {
+        Section("Vibration controls") {
+            Toggle("All vibrations off", isOn: $feedback.allOff)
+            Toggle("Move vibrations", isOn: $feedback.movesEnabled)
+                .disabled(feedback.allOff)
+            Toggle("Button feedback vibrations", isOn: $feedback.buttonsEnabled)
+                .disabled(feedback.allOff)
+        }
+    }
+
+    private var presetSection: some View {
+        Section("Presets") {
+            Button("Load Easy preset (slow, default)") { pattern = .easy }
+            Button("Load Fast preset") { pattern = .fast }
+            HStack {
+                TextField("New preset name", text: $presetName)
+                Button("Save") {
+                    let name = presetName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    feedback.presets.append(SavedHapticPreset(name: name, pattern: pattern))
+                    presetName = ""
+                }
+                .disabled(presetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            ForEach(feedback.presets) { preset in
+                HStack {
+                    Button(preset.name) { pattern = preset.pattern }
+                    Spacer()
+                    Menu {
+                        Button("Load") { pattern = preset.pattern }
+                        Button("Replace with current pattern") {
+                            if let i = feedback.presets.firstIndex(where: { $0.id == preset.id }) {
+                                feedback.presets[i].pattern = pattern
+                            }
+                        }
+                        Button("Rename") {
+                            renameText = preset.name
+                            renamingID = preset.id
+                        }
+                        Button("Delete", role: .destructive) {
+                            feedback.presets.removeAll { $0.id == preset.id }
+                        }
+                    } label: { Image(systemName: "ellipsis.circle") }
+                }
+            }
+            .onDelete { feedback.presets.remove(atOffsets: $0) }
+        }
+    }
+
+    private var errorSection: some View {
+        Section {
+            Toggle("Invalid-move vibrations", isOn: $feedback.errorsEnabled)
+                .disabled(feedback.allOff)
+            NumberRow(label: "Each buzz lasts", value: $feedback.errorDuration, range: 0.05...3, step: 0.05, unit: "s")
+            NumberRow(label: "Buzz strength", value: $feedback.errorIntensity, range: 0.1...1, step: 0.05, unit: "")
+            Stepper("Number of buzzes: \(feedback.errorCount)", value: $feedback.errorCount, in: 1...8)
+            NumberRow(label: "Gap between buzzes", value: $feedback.errorGap, range: 0...3, step: 0.05, unit: "s")
+            Toggle("Speak invalid-move errors", isOn: $feedback.speakErrors)
+            Button("Test invalid-move feedback") {
+                HapticEngine.shared.error("Invalid move. Enter your opponent's move again.")
+            }
+        } header: {
+            Text("Invalid-move feedback")
+        } footer: {
+            Text("Error speech works independently of Speak the moves. All vibrations off also mutes error vibrations. Duration and strength apply to each buzz; they do not delay move entry.")
         }
     }
 

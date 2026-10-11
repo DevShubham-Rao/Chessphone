@@ -24,10 +24,13 @@ final class PracticeViewModel: ObservableObject {
 
     private var savedUp: (() -> Void)?
     private var savedDown: (() -> Void)?
+    private var attached = false
 
     // MARK: - Volume buttons
 
     func attach() {
+        guard !attached else { return }
+        attached = true
         let handler = VolumeButtonHandler.shared
         savedUp = handler.onVolumeUp
         savedDown = handler.onVolumeDown
@@ -37,14 +40,18 @@ final class PracticeViewModel: ObservableObject {
         handler.onVolumeDown = { [weak self] in
             Task { @MainActor in self?.advance() }
         }
+        handler.start()
     }
 
     func detach() {
+        guard attached else { return }
+        attached = false
         let handler = VolumeButtonHandler.shared
         handler.onVolumeUp = savedUp
         handler.onVolumeDown = savedDown
         HapticEngine.shared.cancel()
         SpeechEngine.shared.stop()
+        isPlaying = false
     }
 
     // MARK: - Flow
@@ -160,6 +167,7 @@ struct PracticeView: View {
                 }
                 .padding(.vertical, 8)
             }
+            .background(VolumeViewContainer().frame(width: 1, height: 1).opacity(0.01))
             .navigationTitle("Practice vibrations")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

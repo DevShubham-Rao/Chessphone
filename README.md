@@ -1,3 +1,7 @@
+# Controls and feedback update
+
+Named presets, vibration toggles, configurable invalid-move feedback, on-screen input buttons, and volume-control recovery have been added. See [CONTROLS_UPDATE.md](CONTROLS_UPDATE.md) for usage and the validation limits of this update.
+
 # ChessPhone + Ray-Ban Meta Board Scan
 
 ChessPhone is an iOS chess assistant that combines:
