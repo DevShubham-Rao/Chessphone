@@ -8,26 +8,20 @@ ChessPhone is an iOS chess assistant that combines:
 
 - Ray-Ban Meta camera capture through Meta Wearables Device Access Toolkit (DAT) 1.0.0
 - iPhone camera fallback for testing
-- Gemini 3.8 Flash vision parsing
+- Gemini Flash vision parsing
 - Stockfish through `chesskit-engine`
 - Spoken and/or haptic move output
 - Existing manual volume-button move entry, takebacks, saves, skill level, and depth controls
 
 ## Vision workflow
 
-When **Board scanning** is enabled and the app is waiting for the opponent's move:
+With **Continuous board watch** enabled and Ray-Ban Meta selected, ChessPhone keeps the glasses preview warm. It reads one starting frame, then compares small local image fingerprints while waiting for a board change. After the image moves and settles, it sends one frame to Gemini for piece recognition, validates the position against legal chess moves, and asks Stockfish for a reply. It does not send every preview frame to Gemini.
 
-1. Press **Volume Up** on the iPhone.
-2. The active image source captures the board.
-3. The image is normalized and JPEG-compressed to at most **1024 px on its longest edge**.
-4. The JPEG is sent to **`gemini-3.8-flash`** with a strict JSON response schema.
-5. The app converts Gemini's camera-relative 8x8 rows into true chess coordinates.
-6. The scan is compared with the app's tracked legal position.
-   - If exactly one legal opponent move explains the photo, that move is committed normally.
-   - If the board is unchanged, the last engine recommendation is replayed.
-   - If the board and saved history have drifted apart, the app validates the photographed position, builds a FEN, and asks Stockfish directly without corrupting the saved game.
-7. Stockfish returns a UCI move.
-8. The existing output settings speak the move, vibrate it, or do both.
+The watcher tracks the engine's recommended move separately from the physical board. If the board still shows the position from before that recommendation, it waits for you to play. If it sees the recommendation on the board, it waits for the opponent. If you play a different legal move, it corrects the saved move history to match the board. A **Check board now** button is available for recovery. Volume Up and Volume Down remain available for manual move entry.
+
+The iPhone camera remains a manual testing source. Continuous watch is available only with Ray-Ban Meta because the iPhone fallback currently captures still images rather than publishing a live preview.
+
+This version uses whole-board Gemini recognition after local motion gating. It does not yet draw piece boxes or normalize the board perspective like the video; that would require a dedicated on-device chess-piece detector and board-corner tracker. The glasses preview is configured at 2 FPS, so a real move may take a couple of seconds to register before image recognition and Stockfish search begin.
 
 ## Ray-Ban Meta support
 
@@ -40,7 +34,7 @@ The project is pinned to:
 - `MWDATCamera`
 - iOS deployment target **17.2**
 
-The camera stream is kept warm at high resolution / 2 FPS so a Volume Up press can request a still without reconnecting first. The low frame rate leaves more transport bandwidth for the photo.
+The camera stream is kept warm at medium resolution / 2 FPS. Continuous watch uses those preview frames for local change detection and only requests a still-photo fallback if a fresh preview frame is unavailable.
 
 ## First-time setup
 
@@ -53,7 +47,7 @@ The camera stream is kept warm at high resolution / 2 FPS so a Volume Up press c
 5. Open **Vibration & Audio Settings → Board scanning**.
 6. Choose **Ray-Ban Meta glasses**.
 7. Tap **Connect Ray-Ban Meta glasses** and approve the registration/permission flow in Meta AI.
-8. Turn on **Volume Up scans the board**.
+8. Turn on **Continuous board watch**.
 
 For Developer Mode, `project.yml` uses placeholder Meta app credentials (`MetaAppID` / `ClientToken` = `0`). For a release-channel build, replace these with values from the Wearables Developer Center and build with the correct Apple Development Team.
 
@@ -104,21 +98,20 @@ Because it is volume-state observation rather than a formal button-event API, te
 - `ChessPhone/BoardImageSource.swift`: image-source protocol + iPhone fallback
 - `ChessPhone/ImagePreprocessor.swift`: 1024 px JPEG normalization
 - `ChessPhone/GeminiKeyProvider.swift`: Keychain/plist/environment key loading
-- `ChessPhone/GeminiBoardReader.swift`: Gemini 3.8 Flash structured vision request
+- `ChessPhone/GeminiBoardReader.swift`: structured Gemini board reading
 - `ChessPhone/BoardPosition.swift`: orientation, sanity checks, scan-to-move matching, FEN-ready position
-- `ChessPhone/VisionCoordinator.swift`: capture → compress → Gemini orchestration + settings UI
-- `ChessPhone/GameState.swift`: Volume Up trigger and scan → Stockfish integration
+- `ChessPhone/VisionCoordinator.swift`: frame capture, Gemini reading, and scan settings
+- `ChessPhone/BoardFrameMonitor.swift`: low-resolution local motion fingerprints
+- `ChessPhone/GameState.swift`: continuous watch and game-history reconciliation
 
 ## Testing status
 
-Performed in this package:
+Checked for this update:
 
-- Swift parser check over every `.swift` source file
-- `project.yml` YAML validation
-- Compiled pure-Swift tests for White camera orientation, Black camera orientation, legal scan matching (`e2e4`), and rebuilding a scanned position
-- Verified both Stockfish NNUE files are present and non-empty
+- `project.yml` parses as valid YAML
+- Both Stockfish NNUE files are present and non-empty
 
-Still requires a real Apple/Meta environment:
+The Swift compiler and Xcode are not available in the editing environment, so this update still needs an Xcode build. It also requires a real Apple/Meta environment for:
 
 - Xcode compile/link against the Meta binary SDK
 - Meta AI registration callback

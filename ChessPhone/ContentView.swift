@@ -139,6 +139,11 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .accessibilityElement(children: .contain)
 
+                if vision.enabled && vm.phase == .opponentSourceColumn {
+                    Button("Check board now") { vm.requestBoardScan() }
+                        .buttonStyle(.borderedProminent)
+                }
+
                 Text(vm.engineStatus)
                     .font(.caption)
                     .foregroundColor(vm.engineStatus.contains("FAILED") ? .red : .secondary)
@@ -152,7 +157,11 @@ struct ContentView: View {
                         .padding(.horizontal)
                 }
 
-                Text(vision.enabled ? "Vision ON: Vol up = scan board • Shake = replay recommendation" : "Vol up = count • Vol down = confirm • Shake = replay the engine recommendation")
+                Text(vision.enabled
+                     ? (vision.sourceKind == .glasses
+                        ? "Board watch ON: move the pieces on the board • Shake = replay recommendation"
+                        : "Camera test mode: tap Check board now • Shake = replay recommendation")
+                     : "Vol up = count • Vol down = confirm • Shake = replay the engine recommendation")
                     .font(.caption2).foregroundColor(.secondary)
                     .multilineTextAlignment(.center).padding(.horizontal)
             }.padding(.vertical, 8)

@@ -54,7 +54,7 @@ final class VisionCoordinator: ObservableObject {
         sourceKind = SourceKind(rawValue: d.string(forKey: "ChessPhone.vision.source") ?? "") ?? .glasses
     }
 
-    /// Start the camera/session ahead of time so the button press only has to take the photo.
+    /// Start the camera/session ahead of time so continuous watch can use its live frames.
     func warmUp() {
         guard enabled else { return }
         Task {
@@ -78,12 +78,37 @@ final class VisionCoordinator: ObservableObject {
         do {
             stage = .capturing
             let image = try await source.captureImage()
+            return try await readBoard(from: image, playerColor: playerColor)
+        } catch {
+            stage = .failed(error.localizedDescription)
+            throw error
+        }
+    }
 
+    /// Captures and reads the first frame when continuous watch starts.
+    func captureWatchBaseline(playerColor: PieceColor) async throws -> (ScannedBoard, [UInt8]) {
+        guard sourceKind == .glasses else { throw VisionError.glassesUnavailable }
+        stage = .capturing
+        let image = try await glasses.captureImage()
+        guard let fingerprint = BoardFrameMonitor.fingerprint(image) else {
+            throw VisionError.imageEncodingFailed
+        }
+        let board = try await readBoard(from: image, playerColor: playerColor)
+        return (board, fingerprint)
+    }
+
+    /// Waits for a physical change in the live glasses view without polling Gemini.
+    func waitForStableChangedFrame(since fingerprint: [UInt8]) async throws -> (UIImage, [UInt8]) {
+        guard sourceKind == .glasses else { throw VisionError.glassesUnavailable }
+        return try await glasses.waitForStableChangedFrame(since: fingerprint)
+    }
+
+    func readBoard(from image: UIImage, playerColor: PieceColor) async throws -> ScannedBoard {
+        do {
             stage = .reading
-            let jpeg = try ImagePreprocessor.jpegData(from: image)       // optimized before upload
+            let jpeg = try ImagePreprocessor.jpegData(from: image)
             let reading = try await reader.readBoard(jpeg: jpeg)
             let board = try BoardOrienter.orient(reading, playerColor: playerColor)
-
             stage = .done
             return board
         } catch {
@@ -102,8 +127,10 @@ struct VisionSettingsSection: View {
 
     var body: some View {
         Section(header: Text("Board scanning"),
-                footer: Text("When on, Volume Up photographs the board (while it's the opponent's turn and you haven't started typing a move) and works out their move for you.")) {
-            Toggle("Volume Up scans the board", isOn: $vision.enabled)
+                footer: Text(vision.sourceKind == .glasses
+                    ? "When on, ChessPhone watches the Ray-Ban live camera view and checks the board after it settles. Keep the board in view. Volume Up remains available for manual move entry."
+                    : "Continuous watch requires Ray-Ban Meta glasses. With the iPhone camera selected, use Check board now to read the board manually.")) {
+            Toggle("Continuous board watch", isOn: $vision.enabled)
             Picker("Camera", selection: $vision.sourceKind) {
                 ForEach(VisionCoordinator.SourceKind.allCases) { Text($0.title).tag($0) }
             }

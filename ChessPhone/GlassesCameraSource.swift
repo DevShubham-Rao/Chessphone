@@ -210,6 +210,47 @@ final class GlassesCameraSource: BoardImageSource {
         return image
     }
 
+    /// Waits for movement followed by a steady view, then returns the newest preview frame.
+    /// The stream is only 2 FPS, so this deliberately waits for three settled frames before
+    /// asking Gemini to read the board. This avoids sending requests while a hand is over it.
+    func waitForStableChangedFrame(since baseline: [UInt8]) async throws -> (UIImage, [UInt8]) {
+        try await prepare()
+        var previousFingerprint = baseline
+        var previousFrameDate: Date?
+        var sawMotion = false
+        var stableFrames = 0
+        let noFrameDeadline = Date().addingTimeInterval(8)
+
+        while true {
+            try Task.checkCancellation()
+            if Date() > noFrameDeadline {
+                throw VisionError.glassesUnavailable
+            }
+            if let date = latestFrameDate, Date().timeIntervalSince(date) > 4 {
+                throw VisionError.glassesUnavailable
+            }
+            if let image = latestFrame, let date = latestFrameDate,
+               date != previousFrameDate,
+               let fingerprint = BoardFrameMonitor.fingerprint(image) {
+                previousFrameDate = date
+                let difference = BoardFrameMonitor.changedFraction(previousFingerprint, fingerprint)
+                if difference >= 0.004 {
+                    sawMotion = true
+                    stableFrames = 0
+                } else if sawMotion && difference <= 0.002 {
+                    stableFrames += 1
+                    if stableFrames >= 3 {
+                        return (image, fingerprint)
+                    }
+                } else if sawMotion {
+                    stableFrames = 0
+                }
+                previousFingerprint = fingerprint
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
     private func freshLiveFrame(maxAge: TimeInterval) -> UIImage? {
         guard let image = latestFrame, let date = latestFrameDate,
               Date().timeIntervalSince(date) <= maxAge else { return nil }

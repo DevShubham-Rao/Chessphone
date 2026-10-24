@@ -97,6 +97,12 @@ final class ChessPhoneViewModel: ObservableObject {
 
     private var engineTask: Task<Void, Never>?
     private var scanTask: Task<Void, Never>?
+    private var watchTask: Task<Void, Never>?
+    private var visionEnabledCancellable: AnyCancellable?
+    private var visionSourceCancellable: AnyCancellable?
+    /// Position on the physical board before the engine's latest recommendation.
+    /// We keep it so the camera can tell whether the user has played that move yet.
+    private var pendingOwnMoveFromPosition: Position?
     /// Bumped on every new game so a late engine answer from an old game is ignored.
     private var gameGeneration = 0
     private let shake = ShakeDetector()
@@ -112,6 +118,17 @@ final class ChessPhoneViewModel: ObservableObject {
         if GameSaveStore.load() != nil {
             hasSavedGame = true
         }
+
+        visionEnabledCancellable = VisionCoordinator.shared.$enabled
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.syncContinuousWatch() }
+            }
+        visionSourceCancellable = VisionCoordinator.shared.$sourceKind
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.syncContinuousWatch() }
+            }
     }
 
     // MARK: - Lifecycle
@@ -143,12 +160,15 @@ final class ChessPhoneViewModel: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = true
 
         Task { await warmUpEngine() }
+        syncContinuousWatch()
     }
 
     func stopInputs() {
         inputsRunning = false
         scanTask?.cancel()
         scanTask = nil
+        watchTask?.cancel()
+        watchTask = nil
         VolumeButtonHandler.shared.stop()
         shake.stop()
         UIApplication.shared.isIdleTimerDisabled = false
@@ -193,13 +213,6 @@ final class ChessPhoneViewModel: ObservableObject {
     // MARK: - Hardware input
 
     func handleVolumeUp(manual: Bool = false) {
-        // In vision mode, the first Volume Up press while waiting for the opponent
-        // is the shutter. Manual tap-entry remains available when vision mode is off.
-        if !manual, VisionCoordinator.shared.enabled, phase == .opponentSourceColumn, tapCount == 0 {
-            requestBoardScan()
-            return
-        }
-
         switch phase {
         case .opponentSourceColumn, .opponentSourceRow, .opponentTargetColumn, .opponentTargetRow, .promotion:
             let limit = phase == .promotion ? 4 : 8
@@ -245,6 +258,7 @@ final class ChessPhoneViewModel: ObservableObject {
             phase = .opponentSourceColumn
             status = "You are Black. Enter White's first move: FROM column."
         }
+        syncContinuousWatch()
     }
 
     func newGame() {
@@ -253,6 +267,9 @@ final class ChessPhoneViewModel: ObservableObject {
         engineTask = nil
         scanTask?.cancel()
         scanTask = nil
+        watchTask?.cancel()
+        watchTask = nil
+        pendingOwnMoveFromPosition = nil
         EngineManager.shared.cancelSearch()
         HapticEngine.shared.cancel()
         SpeechEngine.shared.stop()
@@ -293,6 +310,16 @@ final class ChessPhoneViewModel: ObservableObject {
         }
     }
 
+    private func restorePendingPhysicalRecommendation() {
+        pendingOwnMoveFromPosition = nil
+        guard game.sideToMove != playerColor, let last = game.moveHistory.last else { return }
+        let prior = ChessGame(moves: Array(game.moveHistory.dropLast()))
+        if prior.position.sideToMove == playerColor,
+           prior.position.board[last.from]?.color == playerColor {
+            pendingOwnMoveFromPosition = prior.position
+        }
+    }
+
     func resumeSavedGame() {
         guard let saved = GameSaveStore.load(),
               let color = PieceColor(rawValue: saved.playerColor) else {
@@ -325,6 +352,7 @@ final class ChessPhoneViewModel: ObservableObject {
         if let depth = saved.searchDepth { searchDepth = max(1, min(depth, 30)) }
         game = rebuilt
         lastMove = game.moveHistory.last
+        pendingOwnMoveFromPosition = nil
         selectedSquare = nil
         legalTargets = []
         promotionCandidates = []
@@ -339,9 +367,14 @@ final class ChessPhoneViewModel: ObservableObject {
         } else if game.sideToMove == playerColor {
             startRecommendation()
         } else {
+            // Saves include the engine's recommended move immediately. After relaunch,
+            // the physical board may still be one move behind, so retain that prior board
+            // as the expected "you have not played the advice yet" position.
+            restorePendingPhysicalRecommendation()
             phase = .opponentSourceColumn
             status = "Saved game restored. Enter your opponent's FROM column."
         }
+        syncContinuousWatch()
     }
 
     /// Takeback.
@@ -417,6 +450,7 @@ final class ChessPhoneViewModel: ObservableObject {
         } else if game.sideToMove == playerColor {
             startRecommendation()
         } else {
+            restorePendingPhysicalRecommendation()
             phase = .opponentSourceColumn
             status = "Takeback complete. Enter your opponent's FROM column."
         }
@@ -439,6 +473,7 @@ final class ChessPhoneViewModel: ObservableObject {
         lastSpokenText = ""
         recommendedMoveText = ""
         tapCount = 0
+        pendingOwnMoveFromPosition = nil
     }
 
     // MARK: - Opponent move entry
@@ -455,6 +490,7 @@ final class ChessPhoneViewModel: ObservableObject {
     // position so the opponent's reply can be validated, but it is only
     // *recommended* to the user. The user only enters the opponent's moves.
     private func startRecommendation() {
+        pendingOwnMoveFromPosition = game.position
         phase = .engineCalculating
         tapCount = 0
         status = "Engine is finding your best move..."
@@ -499,6 +535,7 @@ final class ChessPhoneViewModel: ObservableObject {
         let captured = chosen.flatMap { capturedPiece(for: $0) }
 
         guard let move = chosen, game.play(move) else {
+            pendingOwnMoveFromPosition = nil
             phase = .engineFailed
             engineStatus = "Engine: \(failure.isEmpty ? "unknown failure" : failure)"
             status = "The engine could not find your move. Press volume down (or the Retry button) to try again."
@@ -607,6 +644,7 @@ final class ChessPhoneViewModel: ObservableObject {
         }
 
         lastMove = move
+        pendingOwnMoveFromPosition = nil
         selectedSquare = nil
         legalTargets = []
         promotionCandidates = []
@@ -726,6 +764,130 @@ final class ChessPhoneViewModel: ObservableObject {
 // MARK: - Vision board scanning
 
 extension ChessPhoneViewModel {
+    /// Powering on continuous watch starts one long lived observer. The camera stream is
+    /// sampled locally; Gemini is called only after the picture moves and settles.
+    private func syncContinuousWatch() {
+        let canWatch = inputsRunning
+            && VisionCoordinator.shared.enabled
+            && VisionCoordinator.shared.sourceKind == .glasses
+            && phase != .selectSide
+            && phase != .gameOver
+
+        if canWatch {
+            guard watchTask == nil else { return }
+            watchTask = Task { [weak self] in
+                await self?.runContinuousWatch()
+                self?.watchTask = nil
+            }
+        } else {
+            watchTask?.cancel()
+            watchTask = nil
+        }
+    }
+
+    private func runContinuousWatch() async {
+        var fingerprint: [UInt8]?
+        scanStatus = "Connecting to glasses..."
+
+        while !Task.isCancelled {
+            guard VisionCoordinator.shared.enabled,
+                  VisionCoordinator.shared.sourceKind == .glasses,
+                  phase != .selectSide,
+                  phase != .gameOver else { return }
+
+            guard phase == .opponentSourceColumn, tapCount == 0 else {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                continue
+            }
+
+            do {
+                if fingerprint == nil {
+                    let (scan, initialFingerprint) = try await VisionCoordinator.shared
+                        .captureWatchBaseline(playerColor: playerColor)
+                    fingerprint = initialFingerprint
+                    processWatchedBoard(scan)
+                    continue
+                }
+
+                let (image, nextFingerprint) = try await VisionCoordinator.shared
+                    .waitForStableChangedFrame(since: fingerprint!)
+                fingerprint = nextFingerprint
+                guard !Task.isCancelled,
+                      phase == .opponentSourceColumn,
+                      tapCount == 0 else { continue }
+
+                let scan = try await VisionCoordinator.shared.readBoard(from: image, playerColor: playerColor)
+                guard !Task.isCancelled else { return }
+                processWatchedBoard(scan)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                scanStatus = "Watch paused: \(error.localizedDescription)"
+                status = scanStatus
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                fingerprint = nil
+            }
+        }
+    }
+
+    /// Reconciles a visual board with both the recommended move and the game history.
+    /// This is what lets the watcher wait for the user to physically play the advice.
+    private func processWatchedBoard(_ scan: ScannedBoard) {
+        scanStatus = "Watching board (\(scan.confidence) confidence)."
+
+        if let beforeRecommendation = pendingOwnMoveFromPosition {
+            if scan.squares == beforeRecommendation.board {
+                status = "Move ready. Play \(recommendedMoveText) on the board; watching for it."
+                return
+            }
+
+            if scan.squares == game.position.board {
+                pendingOwnMoveFromPosition = nil
+                status = "Your move is on the board. Watching for your opponent."
+                return
+            }
+
+            let playedInstead = beforeRecommendation.legalMoves().filter {
+                beforeRecommendation.applying($0).board == scan.squares
+            }
+            if let actualMove = playedInstead.first {
+                // The player chose a different legal move. Replace the engine's speculative
+                // move in the saved line with the move that the camera actually saw.
+                let priorMoves = Array(game.moveHistory.dropLast())
+                var rebuilt = ChessGame(moves: priorMoves)
+                guard rebuilt.play(actualMove) else {
+                    status = "Board changed, but the move could not be matched. Check the board."
+                    return
+                }
+                game = rebuilt
+                lastMove = actualMove
+                pendingOwnMoveFromPosition = nil
+                recommendedMoveText = seatText(actualMove.uci).uppercased()
+                lastEngineMove = ""
+                lastSpokenText = ""
+                phase = .opponentSourceColumn
+                autosave()
+                status = "Detected your move \(seatText(actualMove.uci)). Watching for your opponent."
+                return
+            }
+        }
+
+        switch ScanMatcher.match(scan, against: game.position) {
+        case .move(let move):
+            pendingOwnMoveFromPosition = nil
+            status = "Opponent move detected: \(seatText(move.uci))."
+            commitOpponentMove(move)
+        case .unchanged:
+            if pendingOwnMoveFromPosition == nil {
+                status = "Board confirmed. Watching for a move."
+            }
+        case .noMatch:
+            status = "Board changed, but it does not match one legal move. Hold the glasses steady or check the position."
+            HapticEngine.shared.error("Board position needs checking.")
+        }
+    }
+
     /// Volume Up in vision mode. Additional presses are ignored while a scan is running.
     func requestBoardScan() {
         guard scanTask == nil else { return }
@@ -748,6 +910,11 @@ extension ChessPhoneViewModel {
             let scan = try await VisionCoordinator.shared.captureAndRead(playerColor: playerColor)
             guard !Task.isCancelled, generation == gameGeneration else { return }
             scanStatus = "Board read (\(scan.confidence) confidence)."
+
+            if VisionCoordinator.shared.enabled {
+                processWatchedBoard(scan)
+                return
+            }
 
             switch ScanMatcher.match(scan, against: game.position) {
             case .move(let move):

@@ -2,14 +2,11 @@
 
 ## Runtime path
 
-`iPhone Volume Up`
-→ `VolumeButtonHandler`
-→ `ChessPhoneViewModel.requestBoardScan()`
-→ `VisionCoordinator`
-→ `GlassesCameraSource` (Meta DAT) or `PhoneCameraSource`
-→ `ImagePreprocessor` (max 1024 px, JPEG)
-→ `GeminiBoardReader` (`gemini-3.8-flash`, structured JSON)
-→ `BoardOrienter` / `ScanMatcher`
+`Continuous board watch toggle`
+→ `GlassesCameraSource` (Meta DAT live preview)
+→ local frame fingerprint / motion settling
+→ `GeminiBoardReader` (only after a visual change)
+→ `BoardOrienter` / move-history reconciliation
 → legal `Position.fen`
 → `EngineManager` / Stockfish
 → `SpeechEngine` and/or `HapticEngine`
@@ -18,7 +15,7 @@
 
 Ray-Ban Meta is not exposed to third-party iOS apps as an `AVCaptureDevice`. Use `MWDATCore` for registration, permission, and device sessions, and `MWDATCamera` for the camera stream/photo capture.
 
-The app initializes Meta DAT at launch, handles the `metaWearablesAction` URL callback, requests camera permission through Meta AI, starts a `DeviceSession`, attaches a `Camera`, keeps its `Stream` warm, and calls `capturePhoto(format: .jpeg)` when the trigger fires.
+The app initializes Meta DAT at launch, handles the `metaWearablesAction` URL callback, requests camera permission through Meta AI, starts a `DeviceSession`, attaches a `Camera`, and keeps its `Stream` warm. Continuous watch reads from the live preview and only requests a still photo as a fallback when no recent preview frame is available.
 
 ## Gemini response format
 
