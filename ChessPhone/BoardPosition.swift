@@ -120,11 +120,13 @@ enum ScanMatcher {
             return .move(move) // includes promotions
         }
 
-        // Gemini sometimes places one clearly visible piece on a neighboring square.
-        // Only repair a unique, near-exact legal position (one piece = at most two squares).
+        // Gemini can misplace a pawn by one square and also leave a ghost pawn on its
+        // starting square. That creates three differing squares (source, expected
+        // destination, reported destination). Only repair a unique, near-exact legal
+        // position; ambiguous matches still require a fresh scan.
         let candidates: [(move: Move?, distance: Int)] = [(nil, differenceCount(scan.squares, tracked.board))]
             + legalMoves.map { ($0, differenceCount(scan.squares, tracked.applying($0).board)) }
-        guard let best = candidates.map(\.distance).min(), best > 0, best <= 2 else { return .noMatch }
+        guard let best = candidates.map(\.distance).min(), best > 0, best <= 3 else { return .noMatch }
         let closest = candidates.filter { $0.distance == best }
         guard closest.count == 1, let candidate = closest.first else { return .noMatch }
         if let move = candidate.move { return .correctedMove(move, differingSquares: best) }

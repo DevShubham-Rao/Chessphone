@@ -147,7 +147,6 @@ struct VisionSettingsSection: View {
                 Text("Gemini").tag(ChessRecognitionMode.gemini)
                 Text("My local model").tag(ChessRecognitionMode.local).disabled(!ChessRecognitionMode.localModelInstalled)
             }
-            .disabled(!ChessRecognitionMode.localModelInstalled)
             Text(ChessRecognitionMode.localModelInstalled
                  ? "Choose Gemini or the installed chess model."
                  : "Gemini is ready. My local model becomes selectable after a trained ChessBoardClassifier model is added to a future build.")

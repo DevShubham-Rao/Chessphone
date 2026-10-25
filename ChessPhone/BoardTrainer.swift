@@ -9,6 +9,12 @@ struct BoardTrainingExample: Codable, Identifiable {
     var rows: [String] // rank 8 to rank 1, file a to file h
 }
 
+/// Stable export wrapper so future builds can recognize and migrate the data format.
+private struct BoardTrainingArchive: Codable {
+    let schemaVersion: Int
+    let examples: [BoardTrainingExample]
+}
+
 @MainActor
 final class BoardTrainingStore: ObservableObject {
     static let shared = BoardTrainingStore()
@@ -19,9 +25,12 @@ final class BoardTrainingStore: ObservableObject {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         fileURL = root.appendingPathComponent("chess-training-data.json")
-        if let data = try? Data(contentsOf: fileURL),
-           let decoded = try? JSONDecoder().decode([BoardTrainingExample].self, from: data) {
-            examples = decoded
+        if let data = try? Data(contentsOf: fileURL) {
+            if let archive = try? JSONDecoder().decode(BoardTrainingArchive.self, from: data) {
+                examples = archive.examples
+            } else if let legacy = try? JSONDecoder().decode([BoardTrainingExample].self, from: data) {
+                examples = legacy
+            }
         }
     }
 
@@ -38,14 +47,16 @@ final class BoardTrainingStore: ObservableObject {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(examples).write(to: export, options: .atomic)
+        let archive = BoardTrainingArchive(schemaVersion: 1, examples: examples)
+        try encoder.encode(archive).write(to: export, options: .atomic)
         return export
     }
 
     private func persist() throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(examples).write(to: fileURL, options: .atomic)
+        let archive = BoardTrainingArchive(schemaVersion: 1, examples: examples)
+        try encoder.encode(archive).write(to: fileURL, options: .atomic)
     }
 }
 
@@ -177,5 +188,7 @@ enum ChessRecognitionMode: String, CaseIterable, Identifiable {
     case local
     var id: String { rawValue }
     var title: String { self == .gemini ? "Gemini" : "My local model" }
-    static var localModelInstalled: Bool { Bundle.main.url(forResource: "ChessBoardClassifier", withExtension: "mlmodelc") != nil }
+    // A model file alone is not enough; local inference must also be integrated into the reader.
+    // Keep this unavailable until both are shipped, so the UI cannot promise a non-working mode.
+    static var localModelInstalled: Bool { false }
 }

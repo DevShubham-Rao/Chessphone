@@ -6,7 +6,7 @@ Named presets, vibration toggles, configurable invalid-move feedback, on-screen 
 
 ## Board Trainer
 
-Open **Vibration & Audio Settings → Board Trainer & Data Export**. Choose a clear board photo, optionally use Gemini to fill a draft, correct the labels square by square, and save the example. The app stores the photo with its corrected 8×8 board labels and can export the collection as `ChessPhone-Training-Data.json` for safekeeping and future model training. The `My local model` option remains disabled until a compatible `ChessBoardClassifier` Core ML model is included in a later build. Collecting examples preserves training data; it does not train a local neural model by itself.
+Open **Vibration & Audio Settings → Board Trainer & Data Export**. Choose a clear board photo, optionally use Gemini to fill a draft, correct the labels square by square, and save the example. The app stores the photo with its corrected 8×8 board labels and can export the collection as `ChessPhone-Training-Data.json` for safekeeping and future model training. Exports include a schema version so a future build can migrate the format. The `My local model` option remains disabled because a trained model and its inference code are not included yet. Collecting examples preserves training data; it does not train a local neural model by itself.
 
 ChessPhone is an iOS chess assistant that combines:
 
@@ -110,7 +110,7 @@ Because it is volume-state observation rather than a formal button-event API, te
 
 ## Debugging an incorrect move
 
-During a game, tap the ladybug icon in the top bar to open **Chess Debug**. Run a scan or enter the move again, then inspect the latest events or tap **Copy log** to copy them for troubleshooting. The log includes the sanitized Gemini request (with image bytes omitted), full response text, decoded board rows, mapped board, tracked FEN, legal move list, changed squares, and accepted/rejected move details. The API key is redacted; logs are kept in memory and are cleared when you tap **Clear**. Board rows always use rank 8 to rank 1 and file a to file h, regardless of whether the player chose White or Black. If a scan is an unambiguous near match to exactly one legal position, the app can now repair a one-square piece placement error; it still rejects ambiguous or larger differences.
+During a game, tap the ladybug icon in the top bar to open **Chess Debug**. Run a scan or enter the move again, then inspect the latest events or tap **Copy log** to copy them for troubleshooting. The log includes the sanitized Gemini request (with image bytes omitted), full response text, decoded board rows, mapped board, tracked FEN, legal move list, changed squares, and accepted/rejected move details. The API key is redacted; logs are kept in memory and are cleared when you tap **Clear**. Board rows always use rank 8 to rank 1 and file a to file h, regardless of whether the player chose White or Black. If a scan is an unambiguous near match to exactly one legal position, the app can now repair up to three differing squares, which covers a pawn reported one square too far forward while also left on its starting square. Ambiguous or larger differences are still rejected.
 
 ## Testing status
 
