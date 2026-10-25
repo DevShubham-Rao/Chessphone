@@ -106,7 +106,7 @@ Because it is volume-state observation rather than a formal button-event API, te
 
 ## Debugging an incorrect move
 
-During a game, tap the ladybug icon in the top bar to open **Chess Debug**. Run a scan or enter the move again, then inspect the latest events or tap **Copy log** to copy them for troubleshooting. The log includes the sanitized Gemini request (with image bytes omitted), full response text, decoded board rows, oriented board, tracked FEN, legal move list, changed squares, and accepted/rejected move details. The API key is redacted; logs are kept in memory and are cleared when you tap **Clear**.
+During a game, tap the ladybug icon in the top bar to open **Chess Debug**. Run a scan or enter the move again, then inspect the latest events or tap **Copy log** to copy them for troubleshooting. The log includes the sanitized Gemini request (with image bytes omitted), full response text, decoded board rows, oriented board, tracked FEN, legal move list, changed squares, and accepted/rejected move details. The API key is redacted; logs are kept in memory and are cleared when you tap **Clear**. If a scan is an unambiguous near match to exactly one legal position, the app can now repair a one-square piece placement error; it still rejects ambiguous or larger differences.
 
 ## Testing status
 

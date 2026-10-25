@@ -26,11 +26,14 @@ struct GeminiBoardReader {
     private static let retriesPerModel = 1
 
     private static let prompt = """
-    Read this physical chessboard photo. Return exactly 8 rows from FARTHEST to NEAREST to the camera,
-    and within each row LEFT to RIGHT in the image. Each row must contain exactly 8 characters.
+    Read only the physical chessboard in this photo. Ignore any phone screen, app interface, reflection,
+    or text that may be visible; never use a displayed chessboard as a substitute for the physical board.
+    Return exactly 8 rows from FARTHEST to NEAREST to the camera, and within each row LEFT to RIGHT in the image.
+    Each row must contain exactly 8 characters.
     Use PNBRQK for white pieces, pnbrqk for black pieces, and . for empty squares.
-    Use each piece's actual light/dark color; do not assume a legal or starting position.
-    If the full 8x8 board is not visible, set boardVisible=false and return eight rows of ........
+    Report only pieces you can actually see on the physical squares. Do not guess, reconstruct, or assume a
+    standard setup or legal move. If hands, objects, blur, or framing hide any part of the board, set confidence=low
+    and explain which area is unclear. If the full 8x8 board is not visible, set boardVisible=false and return eight rows of ........
     """
 
     private static let schema: [String: Any] = [

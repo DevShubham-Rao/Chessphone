@@ -895,9 +895,22 @@ extension ChessPhoneViewModel {
             pendingOwnMoveFromPosition = nil
             status = "Opponent move detected: \(seatText(move.uci))."
             commitOpponentMove(move)
+        case .correctedMove(let move, let differingSquares):
+            ChessDebugLog.shared.record("SCAN AUTO-CORRECT", "Matched the nearest unique legal move", details: "Move: \(move.uci)\nScanned board differs from the legal result on \(differingSquares) squares; likely a one-square piece-reading error.\nFEN before move: \(game.fen)")
+            pendingOwnMoveFromPosition = nil
+            status = "Opponent move detected: \(seatText(move.uci)) (board read corrected)."
+            commitOpponentMove(move)
         case .unchanged:
             if pendingOwnMoveFromPosition == nil {
                 status = "Board confirmed. Watching for a move."
+            }
+        case .nearUnchanged(let differingSquares):
+            ChessDebugLog.shared.record("SCAN AUTO-CORRECT", "Board is a near match for the tracked position", details: "Scanned board differs from tracked position on \(differingSquares) squares; treating it as unchanged.")
+            if pendingOwnMoveFromPosition != nil {
+                pendingOwnMoveFromPosition = nil
+                status = "Your move is on the board. Watching for your opponent."
+            } else {
+                status = "Board confirmed (minor reading corrected). Watching for a move."
             }
         case .noMatch:
             ChessDebugLog.shared.record("SCAN NO MATCH", "Scanned board does not match one legal move", details: "Legal moves from tracked position: \(game.legalMoves().map(\.uci).sorted().joined(separator: " "))\nChanged squares relative to tracked position: \(ChessDebugFormat.differences(from: game.position.board, to: scan.squares))")
@@ -940,10 +953,19 @@ extension ChessPhoneViewModel {
                 status = "Opponent move detected: \(seatText(move.uci))."
                 commitOpponentMove(move)
 
+            case .correctedMove(let move, let differingSquares):
+                ChessDebugLog.shared.record("SCAN AUTO-CORRECT", "Manual scan matched the nearest unique legal move", details: "Move: \(move.uci)\nScanned board differs from the legal result on \(differingSquares) squares.")
+                status = "Opponent move detected: \(seatText(move.uci)) (board read corrected)."
+                commitOpponentMove(move)
+
             case .unchanged:
                 ChessDebugLog.shared.record("SCAN MATCH", "Manual scan shows unchanged position", details: "Tracked FEN: \(game.fen)")
                 status = "The board has not changed yet. Play the recommended move, wait for the opponent, then scan again."
                 handleShakeRepeat()
+
+            case .nearUnchanged(let differingSquares):
+                ChessDebugLog.shared.record("SCAN AUTO-CORRECT", "Manual scan is a near match for the tracked position", details: "Scanned board differs from tracked position on \(differingSquares) squares; treating it as unchanged.")
+                status = "The board looks unchanged. Gemini had a small piece-reading error; scan again after the opponent moves."
 
             case .noMatch:
                 ChessDebugLog.shared.record("SCAN NO MATCH", "Manual scan does not match tracked position", details: "Tracked FEN: \(game.fen)\nLegal moves: \(game.legalMoves().map(\.uci).sorted().joined(separator: " "))\nChanged squares: \(ChessDebugFormat.differences(from: game.position.board, to: scan.squares))")

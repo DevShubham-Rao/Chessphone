@@ -106,7 +106,9 @@ extension ScannedBoard {
 
 enum ScanMatch {
     case move(Move)      // the board is exactly one legal opponent move away from the tracked game
+    case correctedMove(Move, differingSquares: Int)
     case unchanged       // the photo shows the tracked position as-is
+    case nearUnchanged(differingSquares: Int)
     case noMatch         // photo and tracked game disagree (misread, or board got out of sync)
 }
 
@@ -114,9 +116,26 @@ enum ScanMatcher {
     /// `tracked` is the position the app is waiting on: opponent to move.
     static func match(_ scan: ScannedBoard, against tracked: Position) -> ScanMatch {
         if scan.squares == tracked.board { return .unchanged }
-        for move in tracked.legalMoves() where tracked.applying(move).board == scan.squares {
-            return .move(move)          // includes promotions: each promotion piece gives a different board
+        let legalMoves = tracked.legalMoves()
+        for move in legalMoves where tracked.applying(move).board == scan.squares {
+            return .move(move) // includes promotions
         }
-        return .noMatch
+
+        // Gemini sometimes places one clearly visible piece on a neighboring square.
+        // Only repair a unique, near-exact legal position (one piece = at most two squares).
+        let candidates: [(move: Move?, distance: Int)] = [(nil, differenceCount(scan.squares, tracked.board))]
+            + legalMoves.map { ($0, differenceCount(scan.squares, tracked.applying($0).board)) }
+        guard let best = candidates.map(\.distance).min(), best > 0, best <= 2 else { return .noMatch }
+        let closest = candidates.filter { $0.distance == best }
+        guard closest.count == 1, let candidate = closest.first else { return .noMatch }
+        if let move = candidate.move { return .correctedMove(move, differingSquares: best) }
+        return .nearUnchanged(differingSquares: best)
+    }
+
+    private static func differenceCount(_ a: [Piece?], _ b: [Piece?]) -> Int {
+        guard a.count == 64, b.count == 64 else { return 65 }
+        return zip(a, b).reduce(into: 0) { count, squares in
+            if squares.0 != squares.1 { count += 1 }
+        }
     }
 }
