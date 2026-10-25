@@ -6,7 +6,7 @@ options:
 packages:
   ChessKitEngine:
     url: https://github.com/chesskit-app/chesskit-engine
-    from: 0.2.0
+    exactVersion: 0.7.0
   MetaWearablesDAT:
     url: https://github.com/facebook/meta-wearables-dat-ios
     exactVersion: 1.0.0
@@ -28,6 +28,8 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIRequiresPersistentWiFi: false
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         CFBundleURLTypes:
           - CFBundleTypeRole: Editor
             CFBundleURLName: "$(PRODUCT_BUNDLE_IDENTIFIER)"
@@ -47,11 +49,25 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.buildertest.chessphone
-        MARKETING_VERSION: "1.1"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "1.2"
+        CURRENT_PROJECT_VERSION: "3"
         SWIFT_VERSION: "5.0"
-    schemes:
-      ChessPhone:
-        build:
-          targets:
-            ChessPhone: all
+  ChessPhoneTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    dependencies:
+      - target: ChessPhone
+      - package: ChessKitEngine
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+schemes:
+  ChessPhone:
+    build:
+      targets:
+        ChessPhone: all
+        ChessPhoneTests: [test]
+    test:
+      targets: [ChessPhoneTests]

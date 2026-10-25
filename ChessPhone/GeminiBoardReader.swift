@@ -3,6 +3,7 @@ import Foundation
 /// What we ask Gemini to return. The model only reports what it SEES; the app does all chess logic.
 struct GeminiBoardReading: Decodable {
     let boardVisible: Bool
+    let handOverBoard: Bool?
     /// 8 strings of 8 characters in canonical coordinates: rank 8 to rank 1, file a to h.
     /// "PNBRQK" = white, "pnbrqk" = black, "." = empty.
     let rows: [String]
@@ -22,8 +23,9 @@ struct GeminiBoardReader {
     /// Minimal keeps this visual transcription request as fast as possible.
     private static let thinkingLevel = "minimal"
 
-    /// One retry total per transiently failing model, then move on quickly.
-    private static let retriesPerModel = 1
+    /// A scan makes at most two HTTP requests: one request and one transient
+    /// retry (or one fallback for an unavailable model), never a retry per model.
+    private static let maximumAttempts = 2
 
     private static let prompt = """
     Read only the physical chessboard in this photo. Ignore any phone screen, app interface, reflection,
@@ -36,90 +38,76 @@ struct GeminiBoardReader {
     Report only pieces you can actually see on the physical squares. Do not guess, reconstruct, or assume a
     standard setup or legal move. If hands, objects, blur, or framing hide any part of the board, set confidence=low
     and explain which area is unclear. If the full 8x8 board is not visible, set boardVisible=false and return eight rows of ........
+    Set handOverBoard=true when a visible hand covers any part of the physical board, otherwise false.
     """
 
     private static let schema: [String: Any] = [
         "type": "OBJECT",
         "properties": [
             "boardVisible": ["type": "BOOLEAN"],
+            "handOverBoard": ["type": "BOOLEAN"],
             "rows": ["type": "ARRAY", "items": ["type": "STRING"], "minItems": 8, "maxItems": 8],
             "confidence": ["type": "STRING", "enum": ["high", "medium", "low"]],
             "notes": ["type": "STRING"]
         ],
         "required": ["boardVisible", "rows", "confidence"],
-        "propertyOrdering": ["boardVisible", "rows", "confidence", "notes"]
+        "propertyOrdering": ["boardVisible", "handOverBoard", "rows", "confidence", "notes"]
     ]
 
     private let urlSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 12
-        config.timeoutIntervalForResource = 18
+        config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForResource = 20
         return URLSession(configuration: config)
     }()
 
-    func readBoard(jpeg: Data) async throws -> GeminiBoardReading {
-        let key: String
-        do {
-            key = try GeminiKeyProvider.apiKey()
-        } catch {
-            await ChessDebugLog.shared.record("ERROR", "Gemini key unavailable", details: error.localizedDescription)
-            throw error
-        }
+    func readBoard(jpeg: Data, beforeRequest: @MainActor () throws -> Void = {}) async throws -> GeminiBoardReading {
+        let key = try GeminiKeyProvider.apiKey()
+        try Task.checkCancellation()
         await ChessDebugLog.shared.recordRequestImage(jpeg)
-        await ChessDebugLog.shared.record("REQUEST", "Board scan started", details: "Image: JPEG, \(jpeg.count) bytes. API key: available (value hidden). Models: \(Self.models.joined(separator: ", ")).")
-        var lastFailure: VisionError = .emptyResponse
+        await ChessDebugLog.shared.record("REQUEST", "Board scan started", details: "Image: JPEG, \(jpeg.count) bytes. API key value hidden. At most two HTTP attempts; each attempt is counted against the estimated allowance.")
+        let deadline = ProcessInfo.processInfo.systemUptime + 45
+        var modelIndex = 0
 
-        for model in Self.models {
-            for attempt in 0...Self.retriesPerModel {
-                do {
-                    await ChessDebugLog.shared.record("REQUEST", "Sending Gemini request", details: "Model: \(model)\nAttempt: \(attempt + 1)\nPrompt:\n\(Self.prompt)\nImage: JPEG inlineData (\(jpeg.count) bytes; base64 omitted from log)\nGeneration config: responseMimeType=application/json, thinkingLevel=\(Self.thinkingLevel), responseSchema=boardVisible + 8 rows + confidence + notes")
-                    return try await requestBoard(jpeg: jpeg, apiKey: key, model: model)
-                } catch let error as VisionError {
-                    lastFailure = error
-                    await ChessDebugLog.shared.record("ERROR", "Gemini request failed", details: "Model: \(model)\nAttempt: \(attempt + 1)\nError: \(error.localizedDescription)")
-
-                    guard case let .http(status, message) = error else { throw error }
-                    if Self.isAuthenticationFailure(status: status) { throw error }
-
-                    if Self.isUnavailableModel(status: status, message: message) {
-                        break
-                    }
-
-                    if Self.isTransient(status: status) {
-                        if attempt < Self.retriesPerModel {
-                            try await Self.backoff()
-                            continue
-                        }
-                        break
-                    }
-
-                    throw error
-                } catch let error as URLError {
-                    // Network timeouts should not make a scan sit for nearly a minute.
-                    lastFailure = .emptyResponse
-                    await ChessDebugLog.shared.record("ERROR", "Gemini network request failed", details: "Model: \(model)\nAttempt: \(attempt + 1)\nNetwork error: \(error.localizedDescription) (code \(error.code.rawValue))")
-                    if attempt < Self.retriesPerModel {
-                        try await Self.backoff()
-                        continue
-                    }
-                    break
-                } catch {
-                    await ChessDebugLog.shared.record("ERROR", "Unexpected Gemini request error", details: "Model: \(model)\nAttempt: \(attempt + 1)\n\(error.localizedDescription)")
-                    throw error
+        for attempt in 0..<Self.maximumAttempts {
+            try Task.checkCancellation()
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { throw VisionError.requestTimeout }
+            let model = Self.models[modelIndex]
+            do {
+                // Reserve immediately before each network attempt, including retries.
+                try await beforeRequest()
+                await ChessDebugLog.shared.record("REQUEST", "Sending Gemini request", details: "Model: \(model)\nAttempt: \(attempt + 1)/\(Self.maximumAttempts)\nPrompt:\n\(Self.prompt)\nImage: JPEG inlineData (\(jpeg.count) bytes; base64 omitted)")
+                return try await requestBoard(jpeg: jpeg, apiKey: key, model: model, timeout: min(20, remaining))
+            } catch let error as VisionError {
+                await ChessDebugLog.shared.record("ERROR", "Gemini request failed", details: "Model: \(model)\nAttempt: \(attempt + 1)\n\(error.localizedDescription)")
+                guard case let .http(status, message) = error,
+                      attempt + 1 < Self.maximumAttempts else { throw error }
+                if Self.isAuthenticationFailure(status: status) { throw error }
+                if Self.isUnavailableModel(status: status, message: message), modelIndex + 1 < Self.models.count {
+                    modelIndex += 1
+                    continue
                 }
+                guard Self.isTransient(status: status) else { throw error }
+                try await Self.backoff()
+            } catch let error as URLError {
+                if Task.isCancelled || error.code == .cancelled { throw CancellationError() }
+                await ChessDebugLog.shared.record("ERROR", "Gemini network request failed", details: "Model: \(model); attempt \(attempt + 1); network code \(error.code.rawValue).")
+                guard attempt + 1 < Self.maximumAttempts, Self.isTransientNetwork(error) else { throw error }
+                try await Self.backoff()
             }
         }
-
-        throw lastFailure
+        throw VisionError.requestTimeout
     }
 
-    private func requestBoard(jpeg: Data, apiKey: String, model: String) async throws -> GeminiBoardReading {
+    private func requestBoard(jpeg: Data, apiKey: String, model: String, timeout: TimeInterval) async throws -> GeminiBoardReading {
         guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent") else {
             throw VisionError.emptyResponse
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
 
@@ -131,6 +119,7 @@ struct GeminiBoardReader {
                 ]
             ]],
             "generationConfig": [
+                "maxOutputTokens": 2048,
                 "responseMimeType": "application/json",
                 "responseSchema": Self.schema,
                 "thinkingConfig": ["thinkingLevel": Self.thinkingLevel]
@@ -159,16 +148,18 @@ struct GeminiBoardReader {
 
         await ChessDebugLog.shared.record("REQUEST", "Gemini HTTP request prepared", details: "POST \(url.absoluteString)\nContent-Type: application/json\nx-goog-api-key: [REDACTED]\nBody size: \(request.httpBody?.count ?? 0) bytes including image data.\nSanitized request JSON (image bytes omitted):\n\(debugBody)")
 
+        try Task.checkCancellation()
         let (data, response) = try await urlSession.data(for: request)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else {
             await ChessDebugLog.shared.record("RESPONSE", "Invalid HTTP response", details: "URLSession returned a non-HTTP response.")
             throw VisionError.emptyResponse
         }
         let rawResponse = String(data: data, encoding: .utf8) ?? "<response was not UTF-8>"
-        let visibleResponse = String(rawResponse.prefix(24000))
-        await ChessDebugLog.shared.record("RESPONSE", "Gemini returned HTTP \(http.statusCode)", details: "Headers: \(http.allHeaderFields)\nBody (\(data.count) bytes; clipped at 24,000 characters):\n\(visibleResponse)")
+        let visibleResponse = String(rawResponse.replacingOccurrences(of: apiKey, with: "[REDACTED]").prefix(24000))
+        await ChessDebugLog.shared.record("RESPONSE", "Gemini returned HTTP \(http.statusCode)", details: "Body (\(data.count) bytes; clipped at 24,000 characters):\n\(visibleResponse)")
         guard http.statusCode == 200 else {
-            throw VisionError.http(http.statusCode, Self.apiMessage(from: data))
+            throw VisionError.http(http.statusCode, Self.apiMessage(from: data).replacingOccurrences(of: apiKey, with: "[REDACTED]"))
         }
 
         struct Envelope: Decodable {
@@ -190,6 +181,10 @@ struct GeminiBoardReader {
             await ChessDebugLog.shared.record("ERROR", "Could not decode Gemini board JSON", details: "Decode error: \(error.localizedDescription)\nCandidate text:\n\(text)")
             throw VisionError.malformedReading("could not decode JSON")
         }
+    }
+
+    private static func isTransientNetwork(_ error: URLError) -> Bool {
+        [.timedOut, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed].contains(error.code)
     }
 
     private static func isTransient(status: Int) -> Bool {

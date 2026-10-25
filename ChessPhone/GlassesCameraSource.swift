@@ -41,6 +41,7 @@ enum GlassesSetup {
 
 @MainActor
 final class GlassesCameraSource: BoardImageSource {
+    var onPreviewFrame: ((UIImage, Date) -> Void)?
     private var deviceSelector: AutoDeviceSelector?
     private var session: DeviceSession?
     private var stopCamera: (() -> Void)?
@@ -122,6 +123,7 @@ final class GlassesCameraSource: BoardImageSource {
             Task { @MainActor in
                 self?.latestFrame = image
                 self?.latestFrameDate = Date()
+                if let self, let date = self.latestFrameDate { self.onPreviewFrame?(image, date) }
             }
         })
 
@@ -219,7 +221,7 @@ final class GlassesCameraSource: BoardImageSource {
         var previousFrameDate: Date?
         var sawMotion = false
         var stableFrames = 0
-        let noFrameDeadline = Date().addingTimeInterval(8)
+        var noFrameDeadline = Date().addingTimeInterval(8)
 
         while true {
             try Task.checkCancellation()
@@ -233,6 +235,9 @@ final class GlassesCameraSource: BoardImageSource {
                date != previousFrameDate,
                let fingerprint = BoardFrameMonitor.fingerprint(image) {
                 previousFrameDate = date
+                // A quiet board can remain unchanged for minutes. Only missing
+                // preview frames should trigger the camera timeout.
+                noFrameDeadline = Date().addingTimeInterval(8)
                 let difference = BoardFrameMonitor.changedFraction(previousFingerprint, fingerprint)
                 if difference >= 0.004 {
                     sawMotion = true
@@ -355,8 +360,12 @@ enum GlassesSetup {
 
 @MainActor
 final class GlassesCameraSource: BoardImageSource {
+    var onPreviewFrame: ((UIImage, Date) -> Void)?
     func prepare() async throws { throw VisionError.sdkNotLinked }
     func captureImage() async throws -> UIImage { throw VisionError.sdkNotLinked }
+    func waitForStableChangedFrame(since baseline: [UInt8]) async throws -> (UIImage, [UInt8]) {
+        throw VisionError.sdkNotLinked
+    }
     func shutdown() {}
 }
 

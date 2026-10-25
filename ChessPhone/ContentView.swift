@@ -7,6 +7,8 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var showingPractice = false
     @State private var showingDebug = false
+    @State private var showingDashboard = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -17,14 +19,25 @@ struct ContentView: View {
             if vm.phase == .selectSide { sideSelection } else { gameScreen }
         }
         .onAppear { vm.startInputs(); vision.warmUp() }
-        .onDisappear { vision.shutdown() }
+        .onDisappear { vm.stopInputs(); vision.shutdown() }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .background {
+                vm.pauseSession()
+                vm.stopInputs()
+                vision.shutdown()
+            } else if newPhase == .active {
+                vm.startInputs()
+                if !vm.sessionPaused { vision.warmUp() }
+            }
+        }
         .sheet(isPresented: $showingSettings) { HapticSettingsView() }
         .fullScreenCover(isPresented: $showingPractice) { PracticeView() }
         .sheet(isPresented: $showingDebug) { ChessDebugView() }
+        .sheet(isPresented: $showingDashboard) { SessionDashboardView(vm: vm) }
     }
 
     private var sideSelection: some View {
-        VStack(spacing: 24) {
+        ScrollView { VStack(spacing: 24) {
             Text("Choose your side").font(.title2.bold())
             HStack(spacing: 20) {
                 Button("WHITE") { vm.selectColor(.white) }
@@ -61,7 +74,7 @@ struct ContentView: View {
                     in: 1...30,
                     step: 1
                 )
-                Text("Higher = stronger but slower (1-30)")
+                Text("Maximum depth 1–30; searches use a 0.5-second thinking budget")
                     .font(.caption).foregroundColor(.secondary)
 
                 Toggle("Black: number the board from my seat", isOn: $vm.blackSeatNumbering)
@@ -85,16 +98,29 @@ struct ContentView: View {
             Button { showingPractice = true } label: {
                 Label("Practice vibrations", systemImage: "graduationcap")
             }.buttonStyle(.bordered)
+            Button { showingDashboard = true } label: {
+                Label("Command Center / Load FEN", systemImage: "slider.horizontal.3")
+            }.buttonStyle(.bordered)
             Text(vm.engineStatus)
                 .font(.caption)
                 .foregroundColor(vm.engineStatus.contains("FAILED") ? .red : .secondary)
                 .multilineTextAlignment(.center).padding(.horizontal)
-        }.padding()
+        }.padding() }
     }
 
     private var gameScreen: some View {
         ScrollView {
             VStack(spacing: 10) {
+                HStack {
+                    Text(vm.sessionStatus).font(.subheadline.bold())
+                    Spacer()
+                    Button(vm.sessionPaused || vision.isBudgetPaused ? "Resume" : "Pause") {
+                        if vm.sessionPaused || vision.isBudgetPaused { vm.resumeSession() } else { vm.pauseSession() }
+                    }.buttonStyle(.bordered)
+                    Button { showingDashboard = true } label: {
+                        Label("Command Center", systemImage: "slider.horizontal.3")
+                    }
+                }.padding(.horizontal)
                 HStack {
                     Text("You: \(vm.playerColor.name)").font(.subheadline.bold())
                     Spacer()
@@ -124,6 +150,11 @@ struct ContentView: View {
                     Text("ENGINE RECOMMENDS: \(vm.recommendedMoveText)")
                         .font(.title3.monospaced().bold()).multilineTextAlignment(.center)
                         .padding(.horizontal)
+                    if vm.suggestionMove != nil {
+                        Text(vm.suggestionEvaluationText).font(.caption)
+                        Button("I played this move") { vm.confirmSuggestedMove() }
+                            .buttonStyle(.bordered)
+                    }
                 }
 
                 VStack(spacing: 4) {
@@ -142,6 +173,7 @@ struct ContentView: View {
                     Button("Replay") { vm.handleShakeRepeat() }
                 }
                 .buttonStyle(.bordered)
+                .disabled(vm.sessionPaused)
                 .accessibilityElement(children: .contain)
 
                 if vision.enabled && vm.phase == .opponentSourceColumn {

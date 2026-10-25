@@ -29,17 +29,21 @@ private struct SavedGame: Codable {
     let playerColor: Int
     let skillLevel: Int
     let searchDepth: Int?
+    let startingFEN: String?
+    let pendingRecommendation: Bool?
 }
 
 private enum GameSaveStore {
     static let key = "ChessPhone.savedGame"
 
-    static func save(game: ChessGame, playerColor: PieceColor, skillLevel: Int, searchDepth: Int) {
+    static func save(game: ChessGame, playerColor: PieceColor, skillLevel: Int, searchDepth: Int, pendingRecommendation: Bool) {
         let payload = SavedGame(
             moves: game.moveHistory.map(\.uci),
             playerColor: playerColor.rawValue,
             skillLevel: skillLevel,
-            searchDepth: searchDepth
+            searchDepth: searchDepth,
+            startingFEN: game.startingPosition.fen,
+            pendingRecommendation: pendingRecommendation
         )
         guard let data = try? JSONEncoder().encode(payload) else { return }
         UserDefaults.standard.set(data, forKey: key)
@@ -58,19 +62,23 @@ private enum GameSaveStore {
 
 @MainActor
 final class ChessPhoneViewModel: ObservableObject {
-    @Published private(set) var phase: InputPhase = .selectSide
+    @Published private(set) var phase: InputPhase = .selectSide { didSet { publishSessionState() } }
     @Published private(set) var tapCount: Int = 0
     @Published private(set) var playerColor: PieceColor = .white
-    @Published private(set) var game = ChessGame()
+    @Published private(set) var game = ChessGame() { didSet { publishSessionState() } }
     @Published private(set) var lastMove: Move?
     @Published private(set) var selectedSquare: Int?
     @Published private(set) var legalTargets: Set<Int> = []
-    @Published private(set) var status: String = "Choose your side."
+    @Published private(set) var status: String = "Choose your side." { didSet { publishSessionState() } }
     @Published private(set) var engineStatus: String = "Engine: starting..."
     @Published private(set) var lastEngineMove: String = ""
     @Published private(set) var recommendedMoveText: String = ""
     @Published private(set) var hapticVisualStage: HapticEngine.VisualStage = .idle
     @Published private(set) var scanStatus: String = ""
+    @Published private(set) var sessionPaused = false
+    @Published private(set) var trackingLost = false
+    @Published private(set) var suggestionEvaluationText = ""
+    @Published private(set) var suggestionConfidence = 0.5
     /// Stockfish "Skill Level" 1...20 (20 = full strength).
     @Published var skillLevel: Int = 20 {
         didSet { UserDefaults.standard.set(skillLevel, forKey: "ChessPhone.skillLevel") }
@@ -100,6 +108,10 @@ final class ChessPhoneViewModel: ObservableObject {
     private var watchTask: Task<Void, Never>?
     private var visionEnabledCancellable: AnyCancellable?
     private var visionSourceCancellable: AnyCancellable?
+    private var visionStateCancellable: AnyCancellable?
+    private var budgetCancellable: AnyCancellable?
+    private var engineFailureAnnounced = false
+    private var watchRevision = 0
     /// Position on the physical board before the engine's latest recommendation.
     /// We keep it so the camera can tell whether the user has played that move yet.
     private var pendingOwnMoveFromPosition: Position?
@@ -129,6 +141,18 @@ final class ChessPhoneViewModel: ObservableObject {
             .sink { [weak self] _ in
                 Task { @MainActor in self?.syncContinuousWatch() }
             }
+        visionStateCancellable = VisionCoordinator.shared.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor in self?.publishSessionState() }
+        }
+        budgetCancellable = VisionCoordinator.shared.$isBudgetPaused.removeDuplicates().sink { [weak self] paused in
+            Task { @MainActor in
+                guard let self, paused, self.phase != .selectSide else { return }
+                self.pauseSession()
+                self.status = "Estimated spending limit reached. Paused. Resume authorizes another budget allowance."
+                self.sessionEvent(.problem, "Estimated spending limit reached")
+                if SpeechEngine.shared.enabled { SpeechEngine.shared.speak("Spending limit reached. Paused.") }
+            }
+        }
     }
 
     // MARK: - Lifecycle
@@ -213,6 +237,7 @@ final class ChessPhoneViewModel: ObservableObject {
     // MARK: - Hardware input
 
     func handleVolumeUp(manual: Bool = false) {
+        guard !sessionPaused else { return }
         switch phase {
         case .opponentSourceColumn, .opponentSourceRow, .opponentTargetColumn, .opponentTargetRow, .promotion:
             let limit = phase == .promotion ? 4 : 8
@@ -229,6 +254,7 @@ final class ChessPhoneViewModel: ObservableObject {
     }
 
     func handleVolumeDown() {
+        guard !sessionPaused else { return }
         switch phase {
         case .opponentSourceColumn, .opponentSourceRow, .opponentTargetColumn, .opponentTargetRow, .promotion:
             confirmInput()
@@ -250,6 +276,8 @@ final class ChessPhoneViewModel: ObservableObject {
         guard phase == .selectSide else { return }
         resetGameState()
         playerColor = color
+        VisionCoordinator.shared.resetSessionBudget()
+        SessionJournal.shared.startSession(playerColor: color, initialFEN: game.fen)
         if color == .white {
             // White moves first: the engine recommends the opening move.
             startRecommendation()
@@ -259,9 +287,11 @@ final class ChessPhoneViewModel: ObservableObject {
             status = "You are Black. Enter White's first move: FROM column."
         }
         syncContinuousWatch()
+        autosave()
     }
 
     func newGame() {
+        SessionJournal.shared.finishSession()
         gameGeneration += 1
         engineTask?.cancel()
         engineTask = nil
@@ -291,8 +321,11 @@ final class ChessPhoneViewModel: ObservableObject {
     private func autosave() {
         guard phase != .selectSide else { return }
         GameSaveStore.save(game: game, playerColor: playerColor,
-                           skillLevel: skillLevel, searchDepth: searchDepth)
+                           skillLevel: skillLevel, searchDepth: searchDepth,
+                           pendingRecommendation: pendingOwnMoveFromPosition != nil)
         hasSavedGame = true
+        SessionJournal.shared.writePGN(confirmedGame.pgn(playerColor: playerColor))
+        publishSessionState()
     }
 
     /// After loading or taking back moves: if the last move was the engine's,
@@ -313,7 +346,7 @@ final class ChessPhoneViewModel: ObservableObject {
     private func restorePendingPhysicalRecommendation() {
         pendingOwnMoveFromPosition = nil
         guard game.sideToMove != playerColor, let last = game.moveHistory.last else { return }
-        let prior = ChessGame(moves: Array(game.moveHistory.dropLast()))
+        let prior = ChessGame(startingPosition: game.startingPosition, moves: Array(game.moveHistory.dropLast()))
         if prior.position.sideToMove == playerColor,
            prior.position.board[last.from]?.color == playerColor {
             pendingOwnMoveFromPosition = prior.position
@@ -337,7 +370,12 @@ final class ChessPhoneViewModel: ObservableObject {
         SpeechEngine.shared.stop()
 
         let moves = saved.moves.compactMap { Move(uci: $0) }
-        let rebuilt = ChessGame(moves: moves)
+        guard moves.count == saved.moves.count,
+              let initial = try? Position(fen: saved.startingFEN ?? Position.start.fen) else {
+            status = "The saved game contains an invalid position or move."
+            return
+        }
+        let rebuilt = ChessGame(startingPosition: initial, moves: moves)
 
         // Only accept a save if every recorded move rebuilt cleanly.
         guard rebuilt.moveHistory.count == moves.count else {
@@ -351,6 +389,10 @@ final class ChessPhoneViewModel: ObservableObject {
         skillLevel = max(1, min(saved.skillLevel, 20))
         if let depth = saved.searchDepth { searchDepth = max(1, min(depth, 30)) }
         game = rebuilt
+        sessionPaused = false
+        trackingLost = false
+        VisionCoordinator.shared.resetSessionBudget()
+        SessionJournal.shared.startSession(playerColor: color, initialFEN: initial.fen)
         lastMove = game.moveHistory.last
         pendingOwnMoveFromPosition = nil
         selectedSquare = nil
@@ -361,7 +403,13 @@ final class ChessPhoneViewModel: ObservableObject {
         hasSavedGame = true
         syncEngineMemory()
 
-        if game.outcome != nil {
+        if saved.pendingRecommendation ?? true { restorePendingPhysicalRecommendation() }
+        if pendingOwnMoveFromPosition == nil {
+            recommendedMoveText = ""
+            lastEngineMove = ""
+            lastSpokenText = ""
+        }
+        if game.outcome != nil && pendingOwnMoveFromPosition == nil {
             phase = .gameOver
             status = game.outcome?.summary ?? "Game over."
         } else if game.sideToMove == playerColor {
@@ -370,19 +418,15 @@ final class ChessPhoneViewModel: ObservableObject {
             // Saves include the engine's recommended move immediately. After relaunch,
             // the physical board may still be one move behind, so retain that prior board
             // as the expected "you have not played the advice yet" position.
-            restorePendingPhysicalRecommendation()
             phase = .opponentSourceColumn
             status = "Saved game restored. Enter your opponent's FROM column."
         }
         syncContinuousWatch()
+        autosave()
     }
 
-    /// Takeback.
-    ///  - Half-entered opponent move: just cancels the entry.
-    ///  - Engine thinking / engine failed: removes the opponent move you just entered.
-    ///  - Waiting for the opponent's move: removes the engine's recommendation AND the
-    ///    opponent move before it, so you can enter that opponent move again.
-    ///  - Game over: removes the move that ended the game.
+    /// Cancels partial entry. Otherwise removes the latest confirmed move and
+    /// any pending advice, then re-analyzes if it is the player's turn.
     func undo() {
         guard phase != .selectSide else { return }
 
@@ -399,6 +443,8 @@ final class ChessPhoneViewModel: ObservableObject {
             return
         }
 
+        guard !game.moveHistory.isEmpty else { status = "No moves to undo."; return }
+        let hasPendingAdvice = suggestionMove != nil
         gameGeneration += 1
         engineTask?.cancel()
         engineTask = nil
@@ -409,40 +455,23 @@ final class ChessPhoneViewModel: ObservableObject {
         SpeechEngine.shared.stop()
 
         var moves = game.moveHistory
-        let pliesToRemove: Int
-
-        switch phase {
-        case .engineCalculating, .engineFailed:
-            // The last move on the board is the opponent move just entered.
-            pliesToRemove = 1
-        case .gameOver:
-            // If the engine's recommendation ended the game, remove it and the
-            // opponent move before it; if the opponent's move ended it, remove just that.
-            pliesToRemove = game.sideToMove.opposite == playerColor ? 2 : 1
-        default:
-            // Waiting for the opponent: remove the engine move and the opponent move before it.
-            pliesToRemove = 2
-        }
+        let pliesToRemove = hasPendingAdvice ? 2 : 1
 
         moves.removeLast(min(pliesToRemove, moves.count))
 
-        game = ChessGame(moves: moves)
+        game = ChessGame(startingPosition: game.startingPosition, moves: moves)
+        pendingOwnMoveFromPosition = nil
+        trackingLost = false
+        suggestionEvaluationText = ""
+        sessionEvent(.undo, "Takeback applied")
         lastMove = game.moveHistory.last
         selectedSquare = nil
         legalTargets = []
         promotionCandidates = []
         tapCount = 0
-        recommendedMoveText = lastMove.map { seatText($0.uci).uppercased() } ?? ""
-        syncEngineMemory()
-
-        if game.moveHistory.isEmpty {
-            recommendedMoveText = ""
-            GameSaveStore.clear()
-            hasSavedGame = false
-            phase = .selectSide
-            status = "Choose your side."
-            return
-        }
+        recommendedMoveText = ""
+        lastEngineMove = ""
+        lastSpokenText = ""
 
         if game.outcome != nil {
             phase = .gameOver
@@ -450,7 +479,6 @@ final class ChessPhoneViewModel: ObservableObject {
         } else if game.sideToMove == playerColor {
             startRecommendation()
         } else {
-            restorePendingPhysicalRecommendation()
             phase = .opponentSourceColumn
             status = "Takeback complete. Enter your opponent's FROM column."
         }
@@ -474,6 +502,11 @@ final class ChessPhoneViewModel: ObservableObject {
         recommendedMoveText = ""
         tapCount = 0
         pendingOwnMoveFromPosition = nil
+        sessionPaused = false
+        trackingLost = false
+        suggestionEvaluationText = ""
+        suggestionConfidence = 0.5
+        engineFailureAnnounced = false
     }
 
     // MARK: - Opponent move entry
@@ -490,6 +523,9 @@ final class ChessPhoneViewModel: ObservableObject {
     // position so the opponent's reply can be validated, but it is only
     // *recommended* to the user. The user only enters the opponent's moves.
     private func startRecommendation() {
+        guard game.outcome == nil, game.sideToMove == playerColor else { return }
+        suggestionEvaluationText = ""
+        if sessionPaused { phase = .engineCalculating; return }
         pendingOwnMoveFromPosition = game.position
         phase = .engineCalculating
         tapCount = 0
@@ -509,26 +545,22 @@ final class ChessPhoneViewModel: ObservableObject {
         var chosen: Move?
         var failure = ""
 
-        for _ in 0..<2 {
+        do {
             let reply = await EngineManager.shared.bestMove(
                 fen: fen,
                 depth: searchDepth,
                 skillLevel: skillLevel
             )
-            guard generation == gameGeneration else { return }
+            guard !Task.isCancelled, generation == gameGeneration, !sessionPaused else { return }
 
-            guard let uci = reply else {
-                failure = EngineManager.shared.lastError
-                ChessDebugLog.shared.record("ENGINE ERROR", "Stockfish returned no move", details: "FEN: \(fen)\nError: \(failure)")
-                continue
-            }
-            if let move = game.legalMove(uci: uci) {
+            if let uci = reply, let move = game.legalMove(uci: uci) {
                 chosen = move
                 ChessDebugLog.shared.record("ENGINE RESPONSE", "Stockfish move accepted", details: "UCI: \(uci)\nFEN: \(fen)")
-                break
+            } else {
+                failure = EngineManager.shared.lastError
+                if failure.isEmpty { failure = "Stockfish returned a missing or illegal move." }
+                ChessDebugLog.shared.record("ENGINE ERROR", "Stockfish returned no move", details: "FEN: \(fen)\nError: \(failure)")
             }
-            failure = "Stockfish replied '\(uci)', which is not legal here."
-            ChessDebugLog.shared.record("ENGINE ERROR", "Stockfish move rejected by legal move check", details: "Returned UCI: \(uci)\nFEN: \(fen)\nLegal moves: \(game.legalMoves().map(\.uci).sorted().joined(separator: " "))")
         }
 
         guard generation == gameGeneration else { return }
@@ -544,6 +576,11 @@ final class ChessPhoneViewModel: ObservableObject {
             engineStatus = "Engine: \(failure.isEmpty ? "unknown failure" : failure)"
             status = "The engine could not find your move. Press volume down (or the Retry button) to try again."
             HapticEngine.shared.error()
+            sessionEvent(.problem, "Engine could not find a legal move", details: ["reason": failure])
+            if !engineFailureAnnounced && SpeechEngine.shared.enabled {
+                engineFailureAnnounced = true
+                SpeechEngine.shared.speak("Something went wrong. Still trying.")
+            }
             return
         }
 
@@ -551,11 +588,17 @@ final class ChessPhoneViewModel: ObservableObject {
         lastMove = move
         lastEngineMove = move.uci
         recommendedMoveText = seatText(move.uci).uppercased()
+        suggestionEvaluationText = EngineManager.shared.lastEvaluation?.displayText ?? "Evaluation unavailable"
+        suggestionConfidence = EngineManager.shared.lastEvaluation?.confidence ?? 0.5
+        engineFailureAnnounced = false
+        sessionEvent(.suggestion, "Suggested \(pendingOwnMoveFromPosition?.san(for: move) ?? move.uci)",
+                     details: ["uci": move.uci, "evaluation": suggestionEvaluationText])
 
         if let outcome = game.outcome {
             status = "Your recommended move ends the game. \(outcome.summary)"
-            phase = .gameOver
+            phase = .opponentSourceColumn
             announce(move, suffix: .gameOver, piece: mover, captured: captured)
+            autosave()
             return
         }
 
@@ -646,6 +689,9 @@ final class ChessPhoneViewModel: ObservableObject {
     }
 
     private func commitOpponentMove(_ move: Move) {
+        let notation = game.position.san(for: move)
+        guard game.isLegal(move) else { reject("That move is not legal in the tracked position."); return }
+        confirmRecommendedMove()
         guard game.play(move) else {
             ChessDebugLog.shared.record("MOVE REJECTED", "Move failed final legality check", details: "Move: \(move.uci)\nSide to move: \(game.sideToMove.name)\nPosition FEN: \(game.fen)\nLegal moves: \(game.legalMoves().map(\.uci).sorted().joined(separator: " "))")
             cancelOpponentMoveEntry("That opponent move was illegal. Start again.")
@@ -659,6 +705,10 @@ final class ChessPhoneViewModel: ObservableObject {
         selectedSquare = nil
         legalTargets = []
         promotionCandidates = []
+        trackingLost = false
+        recommendedMoveText = ""
+        suggestionEvaluationText = ""
+        sessionEvent(.move, "Opponent played \(notation)", details: ["uci": move.uci])
         HapticEngine.shared.confirm()
 
         if let outcome = game.outcome {
@@ -684,7 +734,8 @@ final class ChessPhoneViewModel: ObservableObject {
         phase = .gameOver
         selectedSquare = nil
         legalTargets = []
-        status = "Opponent played \(lastMove.map { seatText($0.uci) } ?? ""). \(outcome.summary)"
+        status = outcome.summary
+        sessionEvent(.gameOver, outcome.summary)
         let speech = SpeechEngine.shared
         if speech.enabled && speech.timing == .audioOnly {
             HapticEngine.shared.cancel()
@@ -771,6 +822,167 @@ final class ChessPhoneViewModel: ObservableObject {
     }
 }
 
+// MARK: - Native command center and session controls
+
+extension ChessPhoneViewModel {
+    var physicalPosition: Position { pendingOwnMoveFromPosition ?? game.position }
+    var suggestionMove: Move? {
+        guard pendingOwnMoveFromPosition != nil, let last = game.moveHistory.last,
+              game.sideToMove != playerColor else { return nil }
+        return last
+    }
+    private var confirmedGame: ChessGame {
+        let moves = suggestionMove == nil ? game.moveHistory : Array(game.moveHistory.dropLast())
+        return ChessGame(startingPosition: game.startingPosition, moves: moves)
+    }
+    var moveListText: [String] { confirmedGame.numberedMoves }
+    var sessionStatus: String {
+        if sessionPaused || VisionCoordinator.shared.isBudgetPaused { return "Paused" }
+        if phase == .selectSide { return "Choose your side" }
+        if trackingLost { return "Lost track" }
+        if phase == .gameOver { return "Game over" }
+        if phase == .engineFailed { return "Engine problem" }
+        if phase == .engineCalculating { return "Thinking" }
+        if case .failed(_) = VisionCoordinator.shared.stage, VisionCoordinator.shared.enabled { return "Can't see the board" }
+        if suggestionMove != nil || game.sideToMove == playerColor { return "Your move" }
+        return "Waiting for opponent"
+    }
+
+    func pauseSession() {
+        guard !sessionPaused, phase != .selectSide else { return }
+        sessionPaused = true
+        gameGeneration += 1
+        engineTask?.cancel(); engineTask = nil
+        scanTask?.cancel(); scanTask = nil
+        watchRevision += 1
+        watchTask?.cancel(); watchTask = nil
+        EngineManager.shared.cancelSearch()
+        HapticEngine.shared.cancel()
+        SpeechEngine.shared.stop()
+        status = "Session paused."
+        sessionEvent(.paused, "Session paused")
+    }
+
+    func resumeSession() {
+        if VisionCoordinator.shared.isBudgetPaused { VisionCoordinator.shared.resumeBudget() }
+        sessionPaused = false
+        status = "Session resumed."
+        sessionEvent(.resumed, "Session resumed")
+        if phase != .selectSide && phase != .gameOver && game.sideToMove == playerColor {
+            startRecommendation()
+        }
+        syncContinuousWatch()
+    }
+
+    /// Explicit confirmation is also available without a camera, including a mating move.
+    func confirmSuggestedMove() {
+        guard suggestionMove != nil else { return }
+        gameGeneration += 1
+        scanTask?.cancel(); scanTask = nil
+        confirmRecommendedMove()
+        autosave()
+        if phase != .gameOver { status = "Your move confirmed. Waiting for your opponent." }
+    }
+
+    private func confirmRecommendedMove() {
+        guard let move = suggestionMove, let before = pendingOwnMoveFromPosition else { return }
+        pendingOwnMoveFromPosition = nil
+        recommendedMoveText = ""
+        suggestionEvaluationText = ""
+        lastEngineMove = ""
+        lastSpokenText = ""
+        sessionEvent(.move, "You played \(before.san(for: move))", details: ["uci": move.uci, "suggested": "true"])
+        if let outcome = game.outcome {
+            phase = .gameOver
+            status = outcome.summary
+            sessionEvent(.gameOver, outcome.summary)
+            if SpeechEngine.shared.enabled { SpeechEngine.shared.speak(outcome.summary) }
+        }
+    }
+
+    /// SAN (Nf3, O-O) and UCI (g1f3, e7e8q), always in real board coordinates.
+    @discardableResult
+    func submitManualMove(_ notation: String) -> Bool {
+        guard phase != .selectSide, phase != .engineCalculating, phase != .engineFailed else {
+            status = "Start a game and wait for the engine before entering a move."
+            return false
+        }
+        if let before = pendingOwnMoveFromPosition, let actual = before.legalMove(notation: notation) {
+            if actual == suggestionMove {
+                confirmSuggestedMove()
+                return true
+            }
+            var rebuilt = ChessGame(startingPosition: game.startingPosition, moves: Array(game.moveHistory.dropLast()))
+            guard rebuilt.play(actual) else { return false }
+            gameGeneration += 1
+            scanTask?.cancel(); scanTask = nil
+            game = rebuilt
+            pendingOwnMoveFromPosition = nil
+            lastMove = actual
+            lastEngineMove = ""; lastSpokenText = ""; recommendedMoveText = ""; suggestionEvaluationText = ""
+            trackingLost = false
+            sessionEvent(.move, "You played \(before.san(for: actual))", details: ["uci": actual.uci, "suggested": "false"])
+            if let outcome = game.outcome { finishGame(outcome) }
+            else { phase = .opponentSourceColumn; status = "Your move recorded. Waiting for your opponent."; autosave() }
+            return true
+        }
+        guard let move = game.position.legalMove(notation: notation), game.outcome == nil else {
+            status = "Illegal or ambiguous move. Use SAN (Nf3) or UCI (g1f3), in real board coordinates."
+            sessionEvent(.problem, "Manual move rejected", details: ["input": String(notation.prefix(40))])
+            return false
+        }
+        gameGeneration += 1
+        scanTask?.cancel(); scanTask = nil
+        commitOpponentMove(move)
+        return true
+    }
+
+    @discardableResult
+    func startNewGame(color: PieceColor, fen: String?) -> Bool {
+        let position: Position
+        do {
+            let text = fen?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if text.isEmpty { position = .start }
+            else { position = try Position(fen: text) }
+        } catch { status = error.localizedDescription; return false }
+        newGame()
+        playerColor = color
+        game = ChessGame(startingPosition: position)
+        VisionCoordinator.shared.resetSessionBudget()
+        SessionJournal.shared.startSession(playerColor: color, initialFEN: position.fen)
+        if let outcome = game.outcome {
+            phase = .gameOver; status = outcome.summary
+            sessionEvent(.gameOver, outcome.summary)
+        } else if game.sideToMove == color { startRecommendation() }
+        else { phase = .opponentSourceColumn; status = "Position loaded. Waiting for your opponent." }
+        autosave()
+        syncContinuousWatch()
+        return true
+    }
+
+    private func publishSessionState() {
+        let vision = VisionCoordinator.shared
+        SessionJournal.shared.publish(SessionSnapshot(
+            status: sessionStatus, paused: sessionPaused || vision.isBudgetPaused,
+            playerColor: playerColor.name, sideToMove: physicalPosition.sideToMove.name,
+            fen: physicalPosition.fen, moves: moveListText,
+            suggestion: suggestionMove == nil ? nil : recommendedMoveText,
+            evaluation: suggestionMove == nil ? nil : suggestionEvaluationText,
+            confidence: suggestionMove == nil ? nil : suggestionConfidence,
+            estimatedCostUSD: vision.estimatedCostUSD, spendingCapUSD: vision.maxCostUSD,
+            visionModel: "Gemini", precheckEnabled: vision.localGateEnabled))
+    }
+
+    private func sessionEvent(_ kind: SessionEvent.Kind, _ message: String, details: [String: String] = [:]) {
+        SessionJournal.shared.record(kind, message, details: details)
+        if kind == .move || kind == .problem || kind == .recovery,
+           let jpeg = VisionCoordinator.shared.latestAnalyzedFrame?.jpegData(compressionQuality: 0.75) {
+            SessionJournal.shared.saveFrame(jpeg, label: kind.rawValue)
+        }
+        publishSessionState()
+    }
+}
+
 
 // MARK: - Vision board scanning
 
@@ -779,6 +991,8 @@ extension ChessPhoneViewModel {
     /// sampled locally; Gemini is called only after the picture moves and settles.
     private func syncContinuousWatch() {
         let canWatch = inputsRunning
+            && !sessionPaused
+            && !VisionCoordinator.shared.isBudgetPaused
             && VisionCoordinator.shared.enabled
             && VisionCoordinator.shared.sourceKind == .glasses
             && phase != .selectSide
@@ -786,11 +1000,14 @@ extension ChessPhoneViewModel {
 
         if canWatch {
             guard watchTask == nil else { return }
+            watchRevision += 1
+            let revision = watchRevision
             watchTask = Task { [weak self] in
                 await self?.runContinuousWatch()
-                self?.watchTask = nil
+                if self?.watchRevision == revision { self?.watchTask = nil }
             }
         } else {
+            watchRevision += 1
             watchTask?.cancel()
             watchTask = nil
         }
@@ -798,13 +1015,28 @@ extension ChessPhoneViewModel {
 
     private func runContinuousWatch() async {
         var fingerprint: [UInt8]?
+        var observedGeneration = gameGeneration
+        var failures = 0
         scanStatus = "Connecting to glasses..."
 
         while !Task.isCancelled {
             guard VisionCoordinator.shared.enabled,
+                  !sessionPaused, !VisionCoordinator.shared.isBudgetPaused,
                   VisionCoordinator.shared.sourceKind == .glasses,
                   phase != .selectSide,
                   phase != .gameOver else { return }
+
+            if observedGeneration != gameGeneration {
+                fingerprint = nil
+                observedGeneration = gameGeneration
+            }
+
+            if phase == .engineFailed {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled, !sessionPaused else { return }
+                retryEngine()
+                continue
+            }
 
             guard phase == .opponentSourceColumn, tapCount == 0 else {
                 try? await Task.sleep(nanoseconds: 250_000_000)
@@ -813,30 +1045,41 @@ extension ChessPhoneViewModel {
 
             do {
                 if fingerprint == nil {
+                    let generation = gameGeneration
                     let (scan, initialFingerprint) = try await VisionCoordinator.shared
                         .captureWatchBaseline(playerColor: playerColor)
+                    guard !Task.isCancelled, generation == gameGeneration, !sessionPaused,
+                          phase == .opponentSourceColumn, tapCount == 0 else { continue }
                     fingerprint = initialFingerprint
+                    failures = 0
                     processWatchedBoard(scan)
                     continue
                 }
 
+                let generation = gameGeneration
                 let (image, nextFingerprint) = try await VisionCoordinator.shared
                     .waitForStableChangedFrame(since: fingerprint!)
                 fingerprint = nextFingerprint
                 guard !Task.isCancelled,
+                      generation == gameGeneration, !sessionPaused,
                       phase == .opponentSourceColumn,
                       tapCount == 0 else { continue }
 
                 let scan = try await VisionCoordinator.shared.readBoard(from: image, playerColor: playerColor)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == gameGeneration, !sessionPaused,
+                      phase == .opponentSourceColumn, tapCount == 0 else { continue }
+                failures = 0
                 processWatchedBoard(scan)
             } catch is CancellationError {
                 return
             } catch {
                 guard !Task.isCancelled else { return }
+                if VisionCoordinator.shared.isBudgetPaused { return }
+                failures += 1
                 scanStatus = "Watch paused: \(error.localizedDescription)"
                 status = scanStatus
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if failures == 1 { sessionEvent(.problem, "Board watch failed", details: ["reason": error.localizedDescription]) }
+                try? await Task.sleep(nanoseconds: UInt64(min(10.0, pow(2.0, Double(min(failures, 4))))) * 1_000_000_000)
                 fingerprint = nil
             }
         }
@@ -845,11 +1088,13 @@ extension ChessPhoneViewModel {
     /// Reconciles a visual board with both the recommended move and the game history.
     /// This is what lets the watcher wait for the user to physically play the advice.
     private func processWatchedBoard(_ scan: ScannedBoard) {
+        guard !sessionPaused else { return }
         ChessDebugLog.shared.record("SCAN", "Comparing scanned board with tracked game", details: "Confidence: \(scan.confidence)\nNotes: \(scan.notes ?? "<none>")\nPlayer side: \(playerColor.name)\nTracked FEN: \(game.fen)\nTracked board:\n\(ChessDebugFormat.board(game.position.board))\nScanned board:\n\(ChessDebugFormat.board(scan.squares))\nChanged squares: \(ChessDebugFormat.differences(from: game.position.board, to: scan.squares))\nPending recommended move: \(pendingOwnMoveFromPosition == nil ? "none" : recommendedMoveText)")
         scanStatus = "Watching board (\(scan.confidence) confidence)."
 
         if let beforeRecommendation = pendingOwnMoveFromPosition {
             if scan.squares == beforeRecommendation.board {
+                trackingLost = false
                 ChessDebugLog.shared.record("SCAN MATCH", "Board still matches before recommendation", details: "Expected the recommended move to be played: \(recommendedMoveText)")
                 status = "Move ready. Play \(recommendedMoveText) on the board; watching for it."
                 return
@@ -857,7 +1102,10 @@ extension ChessPhoneViewModel {
 
             if scan.squares == game.position.board {
                 ChessDebugLog.shared.record("SCAN MATCH", "Recommended move is visible on the board", details: "Tracked position: \(game.fen)")
-                pendingOwnMoveFromPosition = nil
+                confirmRecommendedMove()
+                trackingLost = false
+                autosave()
+                if phase == .gameOver { return }
                 status = "Your move is on the board. Watching for your opponent."
                 return
             }
@@ -870,7 +1118,7 @@ extension ChessPhoneViewModel {
                 // The player chose a different legal move. Replace the engine's speculative
                 // move in the saved line with the move that the camera actually saw.
                 let priorMoves = Array(game.moveHistory.dropLast())
-                var rebuilt = ChessGame(moves: priorMoves)
+                var rebuilt = ChessGame(startingPosition: game.startingPosition, moves: priorMoves)
                 guard rebuilt.play(actualMove) else {
                     ChessDebugLog.shared.record("ERROR", "Could not rebuild game with detected move", details: "Move: \(actualMove.uci)\nPrior moves: \(priorMoves.map(\.uci).joined(separator: " "))")
                     status = "Board changed, but the move could not be matched. Check the board."
@@ -879,10 +1127,14 @@ extension ChessPhoneViewModel {
                 game = rebuilt
                 lastMove = actualMove
                 pendingOwnMoveFromPosition = nil
-                recommendedMoveText = seatText(actualMove.uci).uppercased()
+                recommendedMoveText = ""
+                suggestionEvaluationText = ""
+                trackingLost = false
                 lastEngineMove = ""
                 lastSpokenText = ""
                 phase = .opponentSourceColumn
+                sessionEvent(.move, "You played \(beforeRecommendation.san(for: actualMove))", details: ["uci": actualMove.uci, "suggested": "false"])
+                if let outcome = game.outcome { finishGame(outcome); return }
                 autosave()
                 status = "Detected your move \(seatText(actualMove.uci)). Watching for your opponent."
                 return
@@ -892,35 +1144,30 @@ extension ChessPhoneViewModel {
         switch ScanMatcher.match(scan, against: game.position) {
         case .move(let move):
             ChessDebugLog.shared.record("SCAN MATCH", "Scanned board matches one legal move", details: "Matched UCI: \(move.uci)\nSide to move: \(game.sideToMove.name)")
-            pendingOwnMoveFromPosition = nil
             status = "Opponent move detected: \(seatText(move.uci))."
             commitOpponentMove(move)
         case .correctedMove(let move, let differingSquares):
             ChessDebugLog.shared.record("SCAN AUTO-CORRECT", "Matched the nearest unique legal move", details: "Move: \(move.uci)\nScanned board differs from the legal result on \(differingSquares) squares; likely a one-square piece-reading error.\nFEN before move: \(game.fen)")
-            pendingOwnMoveFromPosition = nil
             status = "Opponent move detected: \(seatText(move.uci)) (board read corrected)."
             commitOpponentMove(move)
         case .unchanged:
+            trackingLost = false
             if pendingOwnMoveFromPosition == nil {
                 status = "Board confirmed. Watching for a move."
             }
         case .nearUnchanged(let differingSquares):
             ChessDebugLog.shared.record("SCAN AUTO-CORRECT", "Board is a near match for the tracked position", details: "Scanned board differs from tracked position on \(differingSquares) squares; treating it as unchanged.")
-            if pendingOwnMoveFromPosition != nil {
-                pendingOwnMoveFromPosition = nil
-                status = "Your move is on the board. Watching for your opponent."
-            } else {
-                status = "Board confirmed (minor reading corrected). Watching for a move."
-            }
+            status = "Board nearly matches. Waiting for a clearer frame before confirming."
         case .noMatch:
             ChessDebugLog.shared.record("SCAN NO MATCH", "Scanned board does not match one legal move", details: "Legal moves from tracked position: \(game.legalMoves().map(\.uci).sorted().joined(separator: " "))\nChanged squares relative to tracked position: \(ChessDebugFormat.differences(from: game.position.board, to: scan.squares))")
             status = "Board changed, but it does not match one legal move. Hold the glasses steady or check the position."
-            HapticEngine.shared.error("Board position needs checking.")
+            markTrackingLost()
         }
     }
 
     /// Volume Up in vision mode. Additional presses are ignored while a scan is running.
     func requestBoardScan() {
+        guard !sessionPaused, !VisionCoordinator.shared.isBudgetPaused else { return }
         guard scanTask == nil else { return }
         guard phase == .opponentSourceColumn, tapCount == 0 else { return }
 
@@ -932,103 +1179,30 @@ extension ChessPhoneViewModel {
         scanTask = Task { [weak self] in
             guard let self else { return }
             await self.runBoardScan(generation: generation)
-            self.scanTask = nil
+            if generation == self.gameGeneration { self.scanTask = nil }
         }
     }
 
     private func runBoardScan(generation: Int) async {
         do {
             let scan = try await VisionCoordinator.shared.captureAndRead(playerColor: playerColor)
-            guard !Task.isCancelled, generation == gameGeneration else { return }
+            guard !Task.isCancelled, generation == gameGeneration, !sessionPaused,
+                  !VisionCoordinator.shared.isBudgetPaused,
+                  phase == .opponentSourceColumn, tapCount == 0 else { return }
             scanStatus = "Board read (\(scan.confidence) confidence)."
-
-            if VisionCoordinator.shared.enabled {
-                processWatchedBoard(scan)
-                return
-            }
-
-            switch ScanMatcher.match(scan, against: game.position) {
-            case .move(let move):
-                ChessDebugLog.shared.record("SCAN MATCH", "Manual scan matched a legal move", details: "Matched UCI: \(move.uci)\nSide to move: \(game.sideToMove.name)")
-                status = "Opponent move detected: \(seatText(move.uci))."
-                commitOpponentMove(move)
-
-            case .correctedMove(let move, let differingSquares):
-                ChessDebugLog.shared.record("SCAN AUTO-CORRECT", "Manual scan matched the nearest unique legal move", details: "Move: \(move.uci)\nScanned board differs from the legal result on \(differingSquares) squares.")
-                status = "Opponent move detected: \(seatText(move.uci)) (board read corrected)."
-                commitOpponentMove(move)
-
-            case .unchanged:
-                ChessDebugLog.shared.record("SCAN MATCH", "Manual scan shows unchanged position", details: "Tracked FEN: \(game.fen)")
-                status = "The board has not changed yet. Play the recommended move, wait for the opponent, then scan again."
-                handleShakeRepeat()
-
-            case .nearUnchanged(let differingSquares):
-                ChessDebugLog.shared.record("SCAN AUTO-CORRECT", "Manual scan is a near match for the tracked position", details: "Scanned board differs from tracked position on \(differingSquares) squares; treating it as unchanged.")
-                status = "The board looks unchanged. Gemini had a small piece-reading error; scan again after the opponent moves."
-
-            case .noMatch:
-                ChessDebugLog.shared.record("SCAN NO MATCH", "Manual scan does not match tracked position", details: "Tracked FEN: \(game.fen)\nLegal moves: \(game.legalMoves().map(\.uci).sorted().joined(separator: " "))\nChanged squares: \(ChessDebugFormat.differences(from: game.position.board, to: scan.squares))")
-                await recommendFromScan(scan, generation: generation)
-            }
+            // A manual iPhone/glasses scan must reconcile the physical position
+            // exactly as continuous watch does, including unplayed suggestions.
+            processWatchedBoard(scan)
         } catch is CancellationError {
             return
         } catch {
-            guard generation == gameGeneration else { return }
+            guard !Task.isCancelled, generation == gameGeneration, !sessionPaused else { return }
             scanFailed(error)
         }
     }
-
-    /// If the photographed board no longer matches the tracked move history, use the
-    /// photographed position for this recommendation without corrupting the saved game.
-    private func recommendFromScan(_ scan: ScannedBoard, generation: Int) async {
-        do {
-            let position = try scan.makePosition(sideToMove: playerColor, rightsFrom: game.position)
-            ChessDebugLog.shared.record("ENGINE", "Recovery recommendation from scanned board", details: "FEN: \(position.fen)\nBoard:\n\(ChessDebugFormat.board(position.board))\nSide to move: \(position.sideToMove.name)\nLegal moves: \(position.legalMoves().map(\.uci).sorted().joined(separator: " "))")
-            status = "Photo differs from the tracked game. Finding a move from the photo..."
-
-            let reply = await EngineManager.shared.bestMove(
-                fen: position.fen,
-                depth: searchDepth,
-                skillLevel: skillLevel
-            )
-            ChessDebugLog.shared.record("ENGINE RESPONSE", "Stockfish recovery reply", details: "UCI: \(reply ?? "<nil>")\nFEN: \(position.fen)")
-            guard !Task.isCancelled, generation == gameGeneration else { return }
-            guard let uci = reply, let move = Move(uci: uci), position.legalMoves().contains(move) else {
-                let why = EngineManager.shared.lastError
-                ChessDebugLog.shared.record("ENGINE ERROR", "Recovery move is missing or illegal", details: "Returned UCI: \(reply ?? "<nil>")\nReason: \(why)\nFEN: \(position.fen)\nLegal moves: \(position.legalMoves().map(\.uci).sorted().joined(separator: " "))")
-                throw VisionError.invalidPosition(why.isEmpty ? "engine reply was not legal" : why)
-            }
-
-            let mover = position.board[move.from]?.type
-            let captured = position.board[move.to]?.type
-            let after = position.applying(move)
-            let suffix: HapticEngine.Suffix = after.legalMoves().isEmpty
-                ? .gameOver
-                : (after.isInCheck(after.sideToMove) ? .check : .none)
-            let text = SpeechEngine.shared.phrase(
-                for: seatMove(move),
-                piece: mover,
-                captured: captured,
-                suffix: suffix,
-                outcome: nil,
-                mirrored: seatFlipped
-            )
-
-            // Do not mutate the tracked ChessGame here. This is a recovery path for
-            // a board that no longer matches its move history, so only announce the move.
-            lastEngineMove = move.uci
-            lastSpokenText = text
-            recommendedMoveText = seatText(move.uci).uppercased()
-            scanStatus = "Move found from photographed position."
-            status = "Play \(seatText(move.uci)) as \(playerColor.name) (from the photographed board)."
-            deliver(move: move, suffix: suffix, spoken: text)
-        } catch {
-            scanFailed(error)
-        }
-    }
-
     private func scanFailed(_ error: Error) {
+        guard !Task.isCancelled, !sessionPaused else { return }
+        if VisionCoordinator.shared.isBudgetPaused { return }
         ChessDebugLog.shared.record("ERROR", "Scan handling failed", details: "\(error.localizedDescription)\nTracked FEN: \(game.fen)")
         scanStatus = "Scan failed: \(error.localizedDescription)"
         status = scanStatus
@@ -1036,5 +1210,14 @@ extension ChessPhoneViewModel {
         if SpeechEngine.shared.enabled {
             SpeechEngine.shared.speak((error as? VisionError)?.spoken ?? "Scan failed.")
         }
+    }
+
+    private func markTrackingLost() {
+        status = "Lost track of the board. Scan again, enter the missed move, undo, or load the correct FEN in Command Center."
+        guard !trackingLost else { return }
+        trackingLost = true
+        sessionEvent(.problem, "Lost track of the board")
+        HapticEngine.shared.error("Lost track of the board.")
+        if SpeechEngine.shared.enabled { SpeechEngine.shared.speak("Lost track of the board.") }
     }
 }

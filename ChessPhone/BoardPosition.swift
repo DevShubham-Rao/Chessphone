@@ -15,10 +15,15 @@ enum BoardOrienter {
     /// This does not rotate with the player's seat or camera side.
     static func orient(_ reading: GeminiBoardReading) throws -> ScannedBoard {
         guard reading.boardVisible else { throw VisionError.boardNotVisible }
+        guard reading.handOverBoard != true else { throw VisionError.lowConfidence }
         guard reading.rows.count == 8, reading.rows.allSatisfy({ $0.count == 8 }) else {
             throw VisionError.malformedReading("expected 8 rows of 8 squares")
         }
-        if reading.confidence.lowercased() == "low" { throw VisionError.lowConfidence }
+        let confidence = reading.confidence.lowercased()
+        if confidence == "low" { throw VisionError.lowConfidence }
+        guard confidence == "high" || confidence == "medium" else {
+            throw VisionError.malformedReading("unknown confidence value")
+        }
 
         var squares = [Piece?](repeating: nil, count: 64)
         for (row, text) in reading.rows.enumerated() {

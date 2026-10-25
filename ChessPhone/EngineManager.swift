@@ -1,229 +1,293 @@
+
 import Foundation
 import ChessKitEngine
 
-/// Wraps chesskit-engine's Stockfish: starts it once, verifies it actually
-/// answers a search, and exposes a simple async "best move for this FEN" call.
-///
-/// Why FEN instead of "startpos + move list": the app's own rules engine
-/// (ChessRules.swift) is the single source of truth for the position, and we
-/// hand Stockfish that exact position every time. Stockfish and the app can
-/// therefore never drift out of sync, and we only rely on `.position(.fen(_))`,
-/// which the library documents.
-///
-/// Only these library calls are used (all confirmed by earlier builds):
-/// `Engine(type:)`, `start()`, `isRunning`, `responseStream`,
-/// `send(command:)` with `.setoption`, `.position(.fen)`, `.go(depth:)`, `.stop`,
-/// and the `.bestmove(move:ponder:)` response.
+/// A score from the side-to-move's point of view at the position searched.
+/// `confidence` is an evaluation bar, not the probability that a move is correct.
+struct EngineEvaluation: Equatable {
+    let centipawns: Int?
+    let mate: Int?
+    let depth: Int?
+    let principalVariation: [String]
+
+    var displayText: String {
+        if let mate { return mate > 0 ? "Mate in \(mate)" : "Facing mate in \(abs(mate))" }
+        guard let centipawns else { return "No evaluation" }
+        return String(format: "%+.2f", Double(centipawns) / 100)
+    }
+
+    var confidence: Double {
+        if let mate { return mate > 0 ? 1 : 0 }
+        guard let centipawns else { return 0.5 }
+        let pawns = Double(max(-4000, min(4000, centipawns))) / 100
+        return 1 / (1 + exp(-pawns / 3))
+    }
+
+    /// Accept ordinary UCI as well as ChessKitEngine's angle-bracket diagnostic
+    /// representation. The SDK formats centipawns as a Double (e.g. 25.0).
+    static func parse(uci: String) -> EngineEvaluation? {
+        let plain = uci.replacingOccurrences(of: "<", with: " ").replacingOccurrences(of: ">", with: " ")
+        let words = plain.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard words.first == "info", !words.contains("lowerbound"), !words.contains("upperbound") else { return nil }
+        func value(after name: String) -> String? {
+            guard let i = words.firstIndex(of: name), i + 1 < words.count else { return nil }
+            return words[i + 1]
+        }
+        if let multi = value(after: "multipv"), multi != "1" { return nil }
+        guard let scoreIndex = words.firstIndex(of: "score"), scoreIndex + 2 < words.count,
+              let number = Double(words[scoreIndex + 2]), number.isFinite,
+              number > -1_000_000, number < 1_000_000 else { return nil }
+        let score = Int(number.rounded())
+        let kind = words[scoreIndex + 1]
+        guard kind == "cp" || kind == "mate" else { return nil }
+        let pv: [String]
+        if let i = words.firstIndex(of: "pv"), i + 1 < words.count {
+            pv = Array(words[(i + 1)...]).filter { Move(uci: $0) != nil }
+        } else { pv = [] }
+        return EngineEvaluation(centipawns: kind == "cp" ? score : nil,
+                                mate: kind == "mate" ? score : nil,
+                                depth: value(after: "depth").flatMap(Int.init),
+                                principalVariation: pv)
+    }
+}
+
+/// The bundled iOS Stockfish engine. Every abandoned search retires its engine
+/// and response stream; a late bestmove can never satisfy a later request.
 @MainActor
 final class EngineManager {
     static let shared = EngineManager()
-
     static let startFEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
-    /// Human-readable reason for the most recent failure ("" if none).
-    private(set) var lastError: String = ""
+    private(set) var lastError = ""
     private(set) var isReady = false
+    private(set) var lastEvaluation: EngineEvaluation?
+    private(set) var restartCount = 0
 
     private var engine: Engine?
     private var responseTask: Task<Void, Never>?
+    private var launchTask: Task<Void, Never>?
     private var startTask: Task<Bool, Never>?
-    private var stopTask: Task<Void, Never>?
-
-    // Search bookkeeping
+    private var cleanupTask: Task<Void, Never>?
+    private var cleanupToken = 0
+    private var completedCleanupToken = 0
+    private var commandTask: Task<Void, Never>?
+    private var softDeadlineTask: Task<Void, Never>?
+    private var deadlineTask: Task<Void, Never>?
     private var pending: CheckedContinuation<String?, Never>?
-    private var pendingToken = 0
-    private var tokenCounter = 0
-    /// Number of `bestmove` lines still owed by searches we abandoned (timeout /
-    /// cancel). They are swallowed so they can't be mistaken for the next search's answer.
-    private var staleBestmoves = 0
+    private var engineEpoch = 0
+    private var searchToken = 0
+    private var requestToken = 0
 
-    // MARK: - Start-up
-
-    /// Starts Stockfish if needed and confirms it can search. Safe to call many
-    /// times; concurrent callers share one start-up. Returns true when ready.
+    /// Concurrent callers share startup. Ready check and probe have deadlines.
     func ensureStarted() async -> Bool {
         if isReady { return true }
-        if let running = startTask { return await running.value }
+        if let task = startTask { return await task.value }
         let task = Task { await self.performStart() }
         startTask = task
-        let ok = await task.value
+        let result = await task.value
         startTask = nil
-        return ok
-    }
-
-    private func performStart() async -> Bool {
-        lastError = ""
-
-        if engine == nil {
-            // Stockfish 17 cannot finish starting without its two NNUE nets, so
-            // check the bundle first and report a precise reason on screen.
-            let hasBig = Bundle.main.url(forResource: "nn-1111cefa1111", withExtension: "nnue") != nil
-            let hasSmall = Bundle.main.url(forResource: "nn-37f18f62d772", withExtension: "nnue") != nil
-            guard hasBig && hasSmall else {
-                return fail("NNUE files missing from the app bundle (big: \(hasBig), small: \(hasSmall)). Put both in Resources/ before building.")
-            }
-
-            let newEngine = Engine(type: .stockfish)
-            await newEngine.start()
-
-            // start() can return before Stockfish finishes its uci/isready
-            // handshake (loading the ~75 MB net takes a moment). Wait up to 30 s.
-            var attempts = 0
-            while !(await newEngine.isRunning) && attempts < 300 {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                attempts += 1
-            }
-
-            guard await newEngine.isRunning else {
-                return fail("Stockfish did not start (no ready signal after 30 s).")
-            }
-            guard let stream = await newEngine.responseStream else {
-                return fail("Stockfish started but has no response stream.")
-            }
-
-            engine = newEngine
-            responseTask = Task { [weak self] in
-                for await response in stream {
-                    self?.handle(response)
-                }
-            }
-
-            // Point Stockfish at the NNUE nets we bundled. If they aren't in the
-            // app bundle we carry on anyway (the engine package may ship its own)
-            // and let the test search below decide whether Stockfish really works.
-            if let bigNet = Bundle.main.url(forResource: "nn-1111cefa1111", withExtension: "nnue"),
-               let smallNet = Bundle.main.url(forResource: "nn-37f18f62d772", withExtension: "nnue") {
-                await newEngine.send(command: .setoption(id: "EvalFile", value: bigNet.path))
-                await newEngine.send(command: .setoption(id: "EvalFileSmall", value: smallNet.path))
-            } else {
-                print("ChessPhone: NNUE files not found in the app bundle (see README). Trying the engine's built-in nets.")
-            }
-        }
-
-        // Prove it works: ask for a depth-1 move from the start position.
-        let probe = await search(fen: EngineManager.startFEN, depth: 1, timeout: 30)
-        guard let move = probe, move.count >= 4, move != "(none)" else {
-            return fail("Stockfish started but did not answer a test search. The NNUE files are probably missing - see README.")
-        }
-
-        isReady = true
-        print("ChessPhone: Stockfish ready (test move \(move)).")
-        return true
-    }
-
-    private func fail(_ message: String) -> Bool {
-        lastError = message
-        isReady = false
-        print("ChessPhone: \(message)")
-        return false
-    }
-
-    // MARK: - Searching
-
-    /// Best move (UCI, e.g. "e7e5" or "e7e8q") for the given position, or nil on
-    /// failure - in which case `lastError` explains why. There is deliberately no
-    /// made-up fallback move: a broken engine is reported, not hidden.
-    func bestMove(fen: String, depth: Int = 30, skillLevel: Int = 20) async -> String? {
-        lastError = ""
-        guard await ensureStarted() else { return nil }
-        let clampedSkill = max(0, min(skillLevel, 20))
-        if let engine = engine {
-            // Stockfish's built-in Skill Level is 0...20. The app searches up to depth 30; the skill setting controls move quality.
-            await engine.send(command: .setoption(id: "Skill Level", value: String(clampedSkill)))
-        }
-        let result = await search(fen: fen, depth: max(1, min(depth, 30)), timeout: 60)
-        if result == nil && lastError.isEmpty {
-            lastError = "Stockfish did not return a move in time."
-        }
-        if let move = result, move == "(none)" {
-            lastError = "Stockfish says there is no legal move."
-            return nil
-        }
-        if result != nil { lastError = "" }
         return result
     }
 
-    /// Abandons any search in progress (e.g. when a new game starts).
+    private func performStart() async -> Bool {
+        // Do not let a broken SDK shutdown leave the UI awaiting forever, and
+        // never start another native engine until the previous one has stopped.
+        let cleanupExpires = Date().addingTimeInterval(5)
+        while completedCleanupToken < cleanupToken, Date() < cleanupExpires {
+            guard !Task.isCancelled else { return false }
+            do { try await Task.sleep(nanoseconds: 100_000_000) } catch { return false }
+        }
+        guard completedCleanupToken == cleanupToken else {
+            lastError = "The previous Stockfish engine has not shut down. Pause and try again."
+            return false
+        }
+        cleanupTask = nil
+        guard !Task.isCancelled else { return false }
+        let hasBig = Bundle.main.url(forResource: "nn-1111cefa1111", withExtension: "nnue") != nil
+        let hasSmall = Bundle.main.url(forResource: "nn-37f18f62d772", withExtension: "nnue") != nil
+        guard hasBig && hasSmall else {
+            lastError = "NNUE files missing from the app bundle (big: \(hasBig), small: \(hasSmall)). Include both Resources/ networks when building."
+            return false
+        }
+        engineEpoch += 1
+        let epoch = engineEpoch
+        let newEngine = Engine(type: .stockfish)
+        engine = newEngine
+        launchTask = Task { await newEngine.start() }
+        let expires = Date().addingTimeInterval(10)
+        while !(await newEngine.isRunning), Date() < expires {
+            guard !Task.isCancelled, epoch == engineEpoch else { return false }
+            do { try await Task.sleep(nanoseconds: 100_000_000) } catch { return false }
+        }
+        guard epoch == engineEpoch, !Task.isCancelled else { return false }
+        guard await newEngine.isRunning, let stream = await newEngine.responseStream else {
+            retireEngine(reason: "Stockfish did not become ready within 10 seconds.")
+            return false
+        }
+        responseTask = Task { [weak self] in
+            for await response in stream {
+                guard !Task.isCancelled else { return }
+                self?.handle(response, epoch: epoch)
+            }
+            guard !Task.isCancelled, let self, self.engineEpoch == epoch else { return }
+            self.retireEngine(reason: "Stockfish's response stream closed unexpectedly.")
+        }
+        if let big = Bundle.main.url(forResource: "nn-1111cefa1111", withExtension: "nnue"),
+           let small = Bundle.main.url(forResource: "nn-37f18f62d772", withExtension: "nnue") {
+            await newEngine.send(command: .setoption(id: "EvalFile", value: big.path))
+            await newEngine.send(command: .setoption(id: "EvalFileSmall", value: small.path))
+        }
+        guard epoch == engineEpoch, !Task.isCancelled else { return false }
+        let probe = await search(fen: Self.startFEN, depth: 1, softLimit: 2, hardLimit: 10)
+        guard epoch == engineEpoch, !Task.isCancelled else { return false }
+        guard let probe, let move = Move(uci: probe), Position.start.legalMoves().contains(move) else {
+            retireEngine(reason: lastError.isEmpty ? "Stockfish failed its startup test search." : lastError)
+            return false
+        }
+        lastEvaluation = nil
+        lastError = ""
+        isReady = true
+        return true
+    }
+
+    /// Search up to the chosen depth with a half-second time budget, then stop
+    /// and return the best completed line. A hung engine is replaced once.
+    func bestMove(fen: String, depth: Int = 30, skillLevel: Int = 20) async -> String? {
+        requestToken += 1
+        let request = requestToken
+        lastError = ""
+        lastEvaluation = nil
+        for attempt in 0..<2 {
+            guard !Task.isCancelled, request == requestToken else { return nil }
+            guard await ensureStarted() else {
+                if Task.isCancelled || request != requestToken { return nil }
+                if attempt == 0, !lastError.contains("NNUE files missing") {
+                    restartCount += 1
+                    retireEngine(reason: lastError)
+                    continue
+                }
+                return nil
+            }
+            guard !Task.isCancelled, request == requestToken, let current = engine else { return nil }
+            let epoch = engineEpoch
+            await current.send(command: .setoption(id: "Skill Level", value: String(max(0, min(skillLevel, 20)))))
+            guard !Task.isCancelled, request == requestToken, epoch == engineEpoch else { return nil }
+            let reply = await search(fen: fen, depth: max(1, min(depth, 30)), softLimit: 0.5, hardLimit: 5)
+            guard !Task.isCancelled, request == requestToken else { return nil }
+            if let reply {
+                guard reply != "(none)", reply != "0000" else {
+                    lastError = "The position has no legal move (the game may be over)."
+                    lastEvaluation = nil
+                    return nil
+                }
+                guard Move(uci: reply) != nil else {
+                    retireEngine(reason: "Stockfish returned a malformed move.")
+                    return nil
+                }
+                lastError = ""
+                return reply
+            }
+            if attempt == 0 {
+                restartCount += 1
+                retireEngine(reason: lastError.isEmpty ? "Stockfish did not return a move." : lastError)
+            }
+        }
+        return nil
+    }
+
+    /// Used on pause, takeback, or a new game. Cancellation never retries.
     func cancelSearch() {
-        guard let continuation = pending else { return }
-        pending = nil
-        staleBestmoves += 1
-        continuation.resume(returning: nil)
-        if let engine = engine {
-            stopTask = Task { await engine.send(command: .stop) }
-        }
+        requestToken += 1
+        startTask?.cancel()
+        guard pending != nil || startTask != nil else { return }
+        retireEngine(reason: "Search cancelled.")
     }
 
-    private func search(fen: String, depth: Int, timeout: TimeInterval) async -> String? {
-        guard let engine = engine else { return nil }
-
-        // Make sure any earlier cancel's `stop` has been delivered first, so it
-        // can't land after (and kill) the search we're about to start.
-        await stopTask?.value
-        stopTask = nil
-
-        if let continuation = pending {
-            // Shouldn't happen, but never leave a caller hanging.
-            pending = nil
-            staleBestmoves += 1
-            continuation.resume(returning: nil)
-            await engine.send(command: .stop)
+    private func search(fen: String, depth: Int, softLimit: TimeInterval, hardLimit: TimeInterval) async -> String? {
+        guard !Task.isCancelled, let current = engine else { return nil }
+        guard pending == nil else {
+            retireEngine(reason: "A new search arrived before the previous search completed.")
+            return nil
         }
-
-        tokenCounter += 1
-        let token = tokenCounter
-
-        return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            // Register the continuation BEFORE sending `go`, so a fast bestmove
-            // can never arrive while nobody is waiting for it.
-            self.pending = continuation
-            self.pendingToken = token
-
-            Task {
-                await engine.send(command: .position(.fen(fen)))
-                await engine.send(command: .go(depth: depth))
+        searchToken += 1
+        let token = searchToken
+        let epoch = engineEpoch
+        lastEvaluation = nil
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                pending = continuation
+                commandTask = Task { [weak self] in
+                    guard let self, self.engineEpoch == epoch, self.searchToken == token else { return }
+                    await current.send(command: .position(.fen(fen)))
+                    guard !Task.isCancelled, self.engineEpoch == epoch, self.searchToken == token else { return }
+                    await current.send(command: .go(depth: depth))
+                }
+                softDeadlineTask = Task { [weak self] in
+                    do { try await Task.sleep(nanoseconds: UInt64(softLimit * 1_000_000_000)) } catch { return }
+                    guard let self, self.engineEpoch == epoch, self.searchToken == token, self.pending != nil else { return }
+                    await current.send(command: .stop)
+                }
+                deadlineTask = Task { [weak self] in
+                    do { try await Task.sleep(nanoseconds: UInt64(hardLimit * 1_000_000_000)) } catch { return }
+                    guard let self else { return }
+                    guard self.engineEpoch == epoch, self.searchToken == token, self.pending != nil else { return }
+                    self.retireEngine(reason: "Stockfish timed out. Restarting the engine is required.")
+                }
             }
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                self?.timeoutSearch(token: token)
+        }, onCancel: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.engineEpoch == epoch, self.searchToken == token, self.pending != nil else { return }
+                self.retireEngine(reason: "Search cancelled.")
+            }
+        })
+    }
+
+    private func retireEngine(reason: String) {
+        engineEpoch += 1
+        isReady = false
+        lastEvaluation = nil
+        lastError = reason
+        commandTask?.cancel()
+        commandTask = nil
+        softDeadlineTask?.cancel()
+        softDeadlineTask = nil
+        deadlineTask?.cancel()
+        deadlineTask = nil
+        launchTask?.cancel()
+        launchTask = nil
+        responseTask?.cancel()
+        responseTask = nil
+        let abandoned = pending
+        pending = nil
+        let old = engine
+        engine = nil
+        if let old {
+            let previousCleanup = cleanupTask
+            cleanupToken += 1
+            let token = cleanupToken
+            cleanupTask = Task { [weak self] in
+                await previousCleanup?.value
+                await old.stop()
+                self?.completedCleanupToken = token
             }
         }
+        abandoned?.resume(returning: nil)
     }
 
-    /// Soft time limit: ask Stockfish to stop. It answers with the best move found
-    /// so far, which then resolves the search normally (deep searches on a phone can be slow).
-    /// If it still hasn't answered 5 s later, give up and report a timeout.
-    private func timeoutSearch(token: Int) {
-        guard pendingToken == token, pending != nil, let engine = engine else { return }
-        stopTask = Task { await engine.send(command: .stop) }
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            self?.hardTimeoutSearch(token: token)
-        }
-    }
-
-    private func hardTimeoutSearch(token: Int) {
-        guard pendingToken == token, let continuation = pending else { return }
-        pending = nil
-        staleBestmoves += 1
-        lastError = "Stockfish timed out."
-        isReady = false // re-verify the engine before trusting it again
-        continuation.resume(returning: nil)
-        if let engine = engine {
-            stopTask = Task { await engine.send(command: .stop) }
-        }
-    }
-
-    private func handle(_ response: EngineResponse) {
+    private func handle(_ response: EngineResponse, epoch: Int) {
+        guard epoch == engineEpoch, pending != nil else { return }
         switch response {
+        case .info:
+            if let evaluation = EngineEvaluation.parse(uci: response.rawValue) { lastEvaluation = evaluation }
         case .bestmove(move: let move, ponder: _):
-            if staleBestmoves > 0 {
-                staleBestmoves -= 1
-                return
-            }
-            guard let continuation = pending else { return }
+            let completion = pending
             pending = nil
-            continuation.resume(returning: move)
+            softDeadlineTask?.cancel()
+            softDeadlineTask = nil
+            deadlineTask?.cancel()
+            deadlineTask = nil
+            commandTask = nil
+            completion?.resume(returning: move)
         default:
             break
         }

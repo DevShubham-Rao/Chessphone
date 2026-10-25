@@ -1,0 +1,48 @@
+name: Validate ChessPhone
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 or newer
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Install XcodeGen and generate project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Select available iPhone simulator
+        run: |
+          xcrun simctl list devices available --json > /tmp/chessphone-devices.json
+          python3 - <<'PY'
+          import json, os
+          data = json.load(open('/tmp/chessphone-devices.json'))
+          devices = [d for group in data['devices'].values() for d in group if d['name'].startswith('iPhone') and d.get('isAvailable')]
+          if not devices:
+              raise SystemExit('No available iPhone simulator')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('CHESSPHONE_SIMULATOR=' + devices[0]['udid'] + '\n')
+          PY
+      - name: Build and run unit tests
+        run: |
+          xcodebuild test \
+            -project ChessPhone.xcodeproj \
+            -scheme ChessPhone \
+            -destination "platform=iOS Simulator,id=$CHESSPHONE_SIMULATOR" \
+            -resultBundlePath TestResults.xcresult \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChessPhone-test-results
+          path: TestResults.xcresult

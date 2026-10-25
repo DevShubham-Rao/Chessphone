@@ -19,6 +19,8 @@ final class PhoneCameraSource: NSObject, BoardImageSource, AVCapturePhotoCapture
     private let output = AVCapturePhotoOutput()
     private var configured = false
     private var continuation: CheckedContinuation<UIImage, Error>?
+    private var pendingPhotoID: Int64?
+    private var captureDeadline: Task<Void, Never>?
 
     func prepare() async throws {
         guard await AVCaptureDevice.requestAccess(for: .video) else { throw VisionError.cameraDenied }
@@ -55,13 +57,28 @@ final class PhoneCameraSource: NSObject, BoardImageSource, AVCapturePhotoCapture
 
     func captureImage() async throws -> UIImage {
         try await prepare()
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<UIImage, Error>) in
-            continuation = cont
-            output.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
-        }
+        try Task.checkCancellation()
+        guard continuation == nil else { throw VisionError.captureBusy }
+        let settings = AVCapturePhotoSettings()
+        let photoID = settings.uniqueID
+        return try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<UIImage, Error>) in
+                continuation = cont
+                pendingPhotoID = photoID
+                captureDeadline = Task { [weak self] in
+                    do { try await Task.sleep(nanoseconds: 10_000_000_000) } catch { return }
+                    self?.resolvePhoto(id: photoID, result: .failure(VisionError.captureTimeout))
+                }
+                output.capturePhoto(with: settings, delegate: self)
+            }
+        }, onCancel: { [weak self] in
+            Task { @MainActor in self?.resolvePhoto(id: photoID, result: .failure(CancellationError())) }
+        })
     }
 
     func shutdown() {
+        if let id = pendingPhotoID { resolvePhoto(id: id, result: .failure(CancellationError())) }
         guard session.isRunning else { return }
         let session = self.session
         DispatchQueue.global(qos: .utility).async { session.stopRunning() }
@@ -71,16 +88,24 @@ final class PhoneCameraSource: NSObject, BoardImageSource, AVCapturePhotoCapture
                                  didFinishProcessingPhoto photo: AVCapturePhoto,
                                  error: Error?) {
         let data = photo.fileDataRepresentation()
+        let photoID = photo.resolvedSettings.uniqueID
         Task { @MainActor in
-            guard let cont = self.continuation else { return }
-            self.continuation = nil
             if let error = error {
-                cont.resume(throwing: error)
+                self.resolvePhoto(id: photoID, result: .failure(error))
             } else if let data = data, let image = UIImage(data: data) {
-                cont.resume(returning: image)
+                self.resolvePhoto(id: photoID, result: .success(image))
             } else {
-                cont.resume(throwing: VisionError.imageEncodingFailed)
+                self.resolvePhoto(id: photoID, result: .failure(VisionError.imageEncodingFailed))
             }
         }
+    }
+
+    private func resolvePhoto(id: Int64, result: Result<UIImage, Error>) {
+        guard pendingPhotoID == id, let pending = continuation else { return }
+        continuation = nil
+        pendingPhotoID = nil
+        captureDeadline?.cancel()
+        captureDeadline = nil
+        pending.resume(with: result)
     }
 }

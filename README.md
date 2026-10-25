@@ -1,3 +1,9 @@
+# ChessPhone 1.2 — Command Center update
+
+The attached Chess Hacker feature manual has been adapted to this native iPhone app. Open **Command Center** for session controls, confirmed board/history, live preview, suggestion arrow and evaluation, estimated vision allowance, FEN setup, diagnostics, screen recording, and opt-in JSONL/PGN/photo exports. See [IMPLEMENTED_FEATURES.md](IMPLEMENTED_FEATURES.md) for usage, platform substitutions, and validation limits.
+
+The source requires **Xcode 26+ / Swift 6.2+** and iOS 17.2+. The engine package is pinned to ChessKitEngine 0.7.0. A `ChessPhoneTests` target and **Validate ChessPhone** CI workflow are included.
+
 # Controls and feedback update
 
 Named presets, vibration toggles, configurable invalid-move feedback, on-screen input buttons, and volume-control recovery have been added. See [CONTROLS_UPDATE.md](CONTROLS_UPDATE.md) for usage and the validation limits of this update.
@@ -114,7 +120,7 @@ During a game, tap the ladybug icon in the top bar to open **Chess Debug**. Run 
 
 ## Testing status
 
-The debug overlay and camera-orientation update have not been compiled in this editing environment because the Swift compiler and Xcode are unavailable. Build it in Xcode before installing. It also requires a real Apple/Meta environment for:
+The 1.2 update passed Swift syntax and YAML checks in the Windows editing environment. Xcode compilation and XCTest execution remain pending; see [VALIDATION.md](VALIDATION.md). Build it in Xcode before installing. It also requires a real Apple/Meta environment for:
 
 - Xcode compile/link against the Meta binary SDK
 - Meta AI registration callback
@@ -122,4 +128,4 @@ The debug overlay and camera-orientation update have not been compiled in this e
 - iPhone hardware Volume Up behavior
 - Real Gemini API request with your key
 
-Those cannot be truthfully hardware-verified from a Linux build container.
+Those require real device verification and were not exercised in this Windows editing environment.

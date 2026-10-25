@@ -517,6 +517,7 @@ struct Position {
 /// `play(_:)` re-validates every move against freshly generated legal moves,
 /// so nothing illegal can ever reach the board.
 struct ChessGame {
+    private(set) var startingPosition = Position.start
     private(set) var position = Position.start
     private(set) var moveHistory: [Move] = []
     private(set) var outcome: GameOutcome? = nil
@@ -529,7 +530,15 @@ struct ChessGame {
     /// Rebuilds a game from a previously saved sequence of legal moves.
     /// This preserves castling, en-passant, promotion, repetition, and draw state.
     init(moves: [Move]) {
-        self.init()
+        self.init(startingPosition: .start, moves: moves)
+    }
+
+    /// Keeps the original FEN when restoring or undoing a game joined in progress.
+    init(startingPosition: Position, moves: [Move] = []) {
+        self.startingPosition = startingPosition
+        self.position = startingPosition
+        repetitionCounts[position.repetitionKey] = 1
+        outcome = computeOutcome()
         for move in moves {
             guard play(move) else { break }
         }

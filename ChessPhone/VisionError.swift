@@ -17,6 +17,8 @@ enum VisionError: LocalizedError {
     case boardNotVisible
     case lowConfidence
     case invalidPosition(String)
+    case budgetReached
+    case requestTimeout
 
     var errorDescription: String? {
         switch self {
@@ -35,6 +37,8 @@ enum VisionError: LocalizedError {
         case .boardNotVisible: return "No complete chessboard was visible in the photo."
         case .lowConfidence: return "The board could not be read clearly."
         case .invalidPosition(let why): return "The scanned position is not valid chess: \(why)"
+        case .budgetReached: return "Estimated vision allowance reached. Paused. Resume to authorize another allowance block."
+        case .requestTimeout: return "The vision request exceeded its time limit. Try again."
         }
     }
 
@@ -49,6 +53,8 @@ enum VisionError: LocalizedError {
         case .boardNotVisible: return "I can't see the whole board."
         case .lowConfidence, .malformedReading: return "Couldn't read the board. Try again."
         case .invalidPosition: return "That position doesn't look right. Try again."
+        case .budgetReached: return "Spending limit reached. Paused."
+        case .requestTimeout: return "Vision timed out. Try again."
         }
     }
 }
