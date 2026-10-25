@@ -6,6 +6,7 @@ struct ContentView: View {
     @ObservedObject private var vision = VisionCoordinator.shared
     @State private var showingSettings = false
     @State private var showingPractice = false
+    @State private var showingDebug = false
 
     var body: some View {
         ZStack {
@@ -19,6 +20,7 @@ struct ContentView: View {
         .onDisappear { vision.shutdown() }
         .sheet(isPresented: $showingSettings) { HapticSettingsView() }
         .fullScreenCover(isPresented: $showingPractice) { PracticeView() }
+        .sheet(isPresented: $showingDebug) { ChessDebugView() }
     }
 
     private var sideSelection: some View {
@@ -99,6 +101,9 @@ struct ContentView: View {
                     Button { showingSettings = true } label: {
                         Image(systemName: "gearshape")
                     }.accessibilityLabel("Vibration and Audio Settings")
+                    Button { showingDebug = true } label: {
+                        Image(systemName: "ladybug")
+                    }.accessibilityLabel("Chess Debug Log")
                     Button("Save") { vm.saveCurrentGame() }.font(.subheadline)
                     Button("Takeback") { vm.undo() }.font(.subheadline)
                     Button("New Game") { vm.newGame() }.font(.subheadline)

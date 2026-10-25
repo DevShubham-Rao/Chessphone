@@ -505,6 +505,7 @@ final class ChessPhoneViewModel: ObservableObject {
 
     private func runRecommendation(generation: Int) async {
         let fen = game.fen
+        ChessDebugLog.shared.record("ENGINE", "Stockfish request", details: "FEN: \(fen)\nDepth: \(searchDepth)\nSkill: \(skillLevel)/20\nSide to move: \(game.sideToMove.name)")
         var chosen: Move?
         var failure = ""
 
@@ -518,13 +519,16 @@ final class ChessPhoneViewModel: ObservableObject {
 
             guard let uci = reply else {
                 failure = EngineManager.shared.lastError
+                ChessDebugLog.shared.record("ENGINE ERROR", "Stockfish returned no move", details: "FEN: \(fen)\nError: \(failure)")
                 continue
             }
             if let move = game.legalMove(uci: uci) {
                 chosen = move
+                ChessDebugLog.shared.record("ENGINE RESPONSE", "Stockfish move accepted", details: "UCI: \(uci)\nFEN: \(fen)")
                 break
             }
             failure = "Stockfish replied '\(uci)', which is not legal here."
+            ChessDebugLog.shared.record("ENGINE ERROR", "Stockfish move rejected by legal move check", details: "Returned UCI: \(uci)\nFEN: \(fen)\nLegal moves: \(game.legalMoves().map(\.uci).sorted().joined(separator: " "))")
         }
 
         guard generation == gameGeneration else { return }
@@ -588,6 +592,7 @@ final class ChessPhoneViewModel: ObservableObject {
             let from = Square.index(file: sourceFile, rank: sourceRank)
             let moves = game.legalMoves(from: from)
             guard !moves.isEmpty else {
+                ChessDebugLog.shared.record("MOVE CHECK", "Selected source square has no legal moves", details: "Selected: \(Square.name(from))\nSide to move: \(game.sideToMove.name)\nPosition FEN: \(game.fen)\nLegal moves from any square: \(game.legalMoves().map(\.uci).joined(separator: " "))")
                 cancelOpponentMoveEntry("\(seatName(from)): no legal opponent move. Start again.")
                 return
             }
@@ -611,6 +616,9 @@ final class ChessPhoneViewModel: ObservableObject {
             let candidates = game.legalMoves(from: from).filter { $0.to == to }
 
             guard !candidates.isEmpty else {
+                let requested = Move(from: from, to: to, promotion: nil).uci
+                let allLegal = game.legalMoves().map(\.uci).sorted().joined(separator: " ")
+                ChessDebugLog.shared.record("MOVE REJECTED", "Entered move is not legal in the tracked position", details: "Entered from view coordinates: \(seatName(from))\nEntered to view coordinates: \(seatName(to))\nAbsolute UCI: \(requested)\nPlayer side: \(playerColor.name)\nSide to move: \(game.sideToMove.name)\nSeat flipped: \(seatFlipped)\nPiece on source: \(game.board[from].map { String($0.fenChar) } ?? "empty")\nTracked FEN: \(game.fen)\nLegal moves from source: \(game.legalMoves(from: from).map(\.uci).joined(separator: " "))\nAll legal moves: \(allLegal)")
                 cancelOpponentMoveEntry("Illegal opponent move: \(seatName(from)) to \(seatName(to)). Start again.")
                 return
             }
@@ -639,9 +647,12 @@ final class ChessPhoneViewModel: ObservableObject {
 
     private func commitOpponentMove(_ move: Move) {
         guard game.play(move) else {
+            ChessDebugLog.shared.record("MOVE REJECTED", "Move failed final legality check", details: "Move: \(move.uci)\nSide to move: \(game.sideToMove.name)\nPosition FEN: \(game.fen)\nLegal moves: \(game.legalMoves().map(\.uci).sorted().joined(separator: " "))")
             cancelOpponentMoveEntry("That opponent move was illegal. Start again.")
             return
         }
+
+        ChessDebugLog.shared.record("MOVE ACCEPTED", "Opponent move committed", details: "Move: \(move.uci)\nResulting FEN: \(game.fen)")
 
         lastMove = move
         pendingOwnMoveFromPosition = nil
@@ -834,15 +845,18 @@ extension ChessPhoneViewModel {
     /// Reconciles a visual board with both the recommended move and the game history.
     /// This is what lets the watcher wait for the user to physically play the advice.
     private func processWatchedBoard(_ scan: ScannedBoard) {
+        ChessDebugLog.shared.record("SCAN", "Comparing scanned board with tracked game", details: "Confidence: \(scan.confidence)\nNotes: \(scan.notes ?? "<none>")\nPlayer side: \(playerColor.name)\nTracked FEN: \(game.fen)\nTracked board:\n\(ChessDebugFormat.board(game.position.board))\nScanned board:\n\(ChessDebugFormat.board(scan.squares))\nChanged squares: \(ChessDebugFormat.differences(from: game.position.board, to: scan.squares))\nPending recommended move: \(pendingOwnMoveFromPosition == nil ? "none" : recommendedMoveText)")
         scanStatus = "Watching board (\(scan.confidence) confidence)."
 
         if let beforeRecommendation = pendingOwnMoveFromPosition {
             if scan.squares == beforeRecommendation.board {
+                ChessDebugLog.shared.record("SCAN MATCH", "Board still matches before recommendation", details: "Expected the recommended move to be played: \(recommendedMoveText)")
                 status = "Move ready. Play \(recommendedMoveText) on the board; watching for it."
                 return
             }
 
             if scan.squares == game.position.board {
+                ChessDebugLog.shared.record("SCAN MATCH", "Recommended move is visible on the board", details: "Tracked position: \(game.fen)")
                 pendingOwnMoveFromPosition = nil
                 status = "Your move is on the board. Watching for your opponent."
                 return
@@ -852,11 +866,13 @@ extension ChessPhoneViewModel {
                 beforeRecommendation.applying($0).board == scan.squares
             }
             if let actualMove = playedInstead.first {
+                ChessDebugLog.shared.record("SCAN MATCH", "Detected user's alternate legal move", details: "Move: \(actualMove.uci)\nLegal alternatives from previous position: \(playedInstead.map(\.uci).joined(separator: " "))")
                 // The player chose a different legal move. Replace the engine's speculative
                 // move in the saved line with the move that the camera actually saw.
                 let priorMoves = Array(game.moveHistory.dropLast())
                 var rebuilt = ChessGame(moves: priorMoves)
                 guard rebuilt.play(actualMove) else {
+                    ChessDebugLog.shared.record("ERROR", "Could not rebuild game with detected move", details: "Move: \(actualMove.uci)\nPrior moves: \(priorMoves.map(\.uci).joined(separator: " "))")
                     status = "Board changed, but the move could not be matched. Check the board."
                     return
                 }
@@ -875,6 +891,7 @@ extension ChessPhoneViewModel {
 
         switch ScanMatcher.match(scan, against: game.position) {
         case .move(let move):
+            ChessDebugLog.shared.record("SCAN MATCH", "Scanned board matches one legal move", details: "Matched UCI: \(move.uci)\nSide to move: \(game.sideToMove.name)")
             pendingOwnMoveFromPosition = nil
             status = "Opponent move detected: \(seatText(move.uci))."
             commitOpponentMove(move)
@@ -883,6 +900,7 @@ extension ChessPhoneViewModel {
                 status = "Board confirmed. Watching for a move."
             }
         case .noMatch:
+            ChessDebugLog.shared.record("SCAN NO MATCH", "Scanned board does not match one legal move", details: "Legal moves from tracked position: \(game.legalMoves().map(\.uci).sorted().joined(separator: " "))\nChanged squares relative to tracked position: \(ChessDebugFormat.differences(from: game.position.board, to: scan.squares))")
             status = "Board changed, but it does not match one legal move. Hold the glasses steady or check the position."
             HapticEngine.shared.error("Board position needs checking.")
         }
@@ -918,14 +936,17 @@ extension ChessPhoneViewModel {
 
             switch ScanMatcher.match(scan, against: game.position) {
             case .move(let move):
+                ChessDebugLog.shared.record("SCAN MATCH", "Manual scan matched a legal move", details: "Matched UCI: \(move.uci)\nSide to move: \(game.sideToMove.name)")
                 status = "Opponent move detected: \(seatText(move.uci))."
                 commitOpponentMove(move)
 
             case .unchanged:
+                ChessDebugLog.shared.record("SCAN MATCH", "Manual scan shows unchanged position", details: "Tracked FEN: \(game.fen)")
                 status = "The board has not changed yet. Play the recommended move, wait for the opponent, then scan again."
                 handleShakeRepeat()
 
             case .noMatch:
+                ChessDebugLog.shared.record("SCAN NO MATCH", "Manual scan does not match tracked position", details: "Tracked FEN: \(game.fen)\nLegal moves: \(game.legalMoves().map(\.uci).sorted().joined(separator: " "))\nChanged squares: \(ChessDebugFormat.differences(from: game.position.board, to: scan.squares))")
                 await recommendFromScan(scan, generation: generation)
             }
         } catch is CancellationError {
@@ -941,6 +962,7 @@ extension ChessPhoneViewModel {
     private func recommendFromScan(_ scan: ScannedBoard, generation: Int) async {
         do {
             let position = try scan.makePosition(sideToMove: playerColor, rightsFrom: game.position)
+            ChessDebugLog.shared.record("ENGINE", "Recovery recommendation from scanned board", details: "FEN: \(position.fen)\nBoard:\n\(ChessDebugFormat.board(position.board))\nSide to move: \(position.sideToMove.name)\nLegal moves: \(position.legalMoves().map(\.uci).sorted().joined(separator: " "))")
             status = "Photo differs from the tracked game. Finding a move from the photo..."
 
             let reply = await EngineManager.shared.bestMove(
@@ -948,9 +970,11 @@ extension ChessPhoneViewModel {
                 depth: searchDepth,
                 skillLevel: skillLevel
             )
+            ChessDebugLog.shared.record("ENGINE RESPONSE", "Stockfish recovery reply", details: "UCI: \(reply ?? "<nil>")\nFEN: \(position.fen)")
             guard !Task.isCancelled, generation == gameGeneration else { return }
             guard let uci = reply, let move = Move(uci: uci), position.legalMoves().contains(move) else {
                 let why = EngineManager.shared.lastError
+                ChessDebugLog.shared.record("ENGINE ERROR", "Recovery move is missing or illegal", details: "Returned UCI: \(reply ?? "<nil>")\nReason: \(why)\nFEN: \(position.fen)\nLegal moves: \(position.legalMoves().map(\.uci).sorted().joined(separator: " "))")
                 throw VisionError.invalidPosition(why.isEmpty ? "engine reply was not legal" : why)
             }
 
@@ -983,6 +1007,7 @@ extension ChessPhoneViewModel {
     }
 
     private func scanFailed(_ error: Error) {
+        ChessDebugLog.shared.record("ERROR", "Scan handling failed", details: "\(error.localizedDescription)\nTracked FEN: \(game.fen)")
         scanStatus = "Scan failed: \(error.localizedDescription)"
         status = scanStatus
         HapticEngine.shared.error()

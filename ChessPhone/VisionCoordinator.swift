@@ -77,9 +77,11 @@ final class VisionCoordinator: ObservableObject {
     func captureAndRead(playerColor: PieceColor) async throws -> ScannedBoard {
         do {
             stage = .capturing
+            await ChessDebugLog.shared.record("CAMERA", "Capturing board", details: "Source: \(sourceKind.title)\nPlayer color: \(playerColor.name)")
             let image = try await source.captureImage()
             return try await readBoard(from: image, playerColor: playerColor)
         } catch {
+            await ChessDebugLog.shared.record("ERROR", "Camera capture or board read failed", details: error.localizedDescription)
             stage = .failed(error.localizedDescription)
             throw error
         }
@@ -107,11 +109,14 @@ final class VisionCoordinator: ObservableObject {
         do {
             stage = .reading
             let jpeg = try ImagePreprocessor.jpegData(from: image)
+            await ChessDebugLog.shared.record("IMAGE", "Image prepared for Gemini", details: "Original image: \(Int(image.size.width))×\(Int(image.size.height)) points\nJPEG sent: \(jpeg.count) bytes\nOrientation mapping: \(playerColor.name) seat")
             let reading = try await reader.readBoard(jpeg: jpeg)
             let board = try BoardOrienter.orient(reading, playerColor: playerColor)
+            await ChessDebugLog.shared.record("BOARD", "Gemini board oriented to chess coordinates", details: "Player at camera side: \(playerColor.name)\nConfidence: \(board.confidence)\nNotes: \(board.notes ?? "<none>")\nBoard (rank 8 at top):\n\(ChessDebugFormat.board(board.squares))")
             stage = .done
             return board
         } catch {
+            await ChessDebugLog.shared.record("ERROR", "Board scan pipeline failed", details: error.localizedDescription)
             stage = .failed(error.localizedDescription)
             throw error
         }

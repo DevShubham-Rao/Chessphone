@@ -104,14 +104,13 @@ Because it is volume-state observation rather than a formal button-event API, te
 - `ChessPhone/BoardFrameMonitor.swift`: low-resolution local motion fingerprints
 - `ChessPhone/GameState.swift`: continuous watch and game-history reconciliation
 
+## Debugging an incorrect move
+
+During a game, tap the ladybug icon in the top bar to open **Chess Debug**. Run a scan or enter the move again, then inspect the latest events or tap **Copy log** to copy them for troubleshooting. The log includes the sanitized Gemini request (with image bytes omitted), full response text, decoded board rows, oriented board, tracked FEN, legal move list, changed squares, and accepted/rejected move details. The API key is redacted; logs are kept in memory and are cleared when you tap **Clear**.
+
 ## Testing status
 
-Checked for this update:
-
-- `project.yml` parses as valid YAML
-- Both Stockfish NNUE files are present and non-empty
-
-The Swift compiler and Xcode are not available in the editing environment, so this update still needs an Xcode build. It also requires a real Apple/Meta environment for:
+The debug overlay has not been compiled in this editing environment because the Swift compiler and Xcode are unavailable. Build it in Xcode before installing. It also requires a real Apple/Meta environment for:
 
 - Xcode compile/link against the Meta binary SDK
 - Meta AI registration callback

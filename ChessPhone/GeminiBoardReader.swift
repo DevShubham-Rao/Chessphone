@@ -53,15 +53,25 @@ struct GeminiBoardReader {
     }()
 
     func readBoard(jpeg: Data) async throws -> GeminiBoardReading {
-        let key = try GeminiKeyProvider.apiKey()
+        let key: String
+        do {
+            key = try GeminiKeyProvider.apiKey()
+        } catch {
+            await ChessDebugLog.shared.record("ERROR", "Gemini key unavailable", details: error.localizedDescription)
+            throw error
+        }
+        await ChessDebugLog.shared.recordRequestImage(jpeg)
+        await ChessDebugLog.shared.record("REQUEST", "Board scan started", details: "Image: JPEG, \(jpeg.count) bytes. API key: available (value hidden). Models: \(Self.models.joined(separator: ", ")).")
         var lastFailure: VisionError = .emptyResponse
 
         for model in Self.models {
             for attempt in 0...Self.retriesPerModel {
                 do {
+                    await ChessDebugLog.shared.record("REQUEST", "Sending Gemini request", details: "Model: \(model)\nAttempt: \(attempt + 1)\nPrompt:\n\(Self.prompt)\nImage: JPEG inlineData (\(jpeg.count) bytes; base64 omitted from log)\nGeneration config: responseMimeType=application/json, thinkingLevel=\(Self.thinkingLevel), responseSchema=boardVisible + 8 rows + confidence + notes")
                     return try await requestBoard(jpeg: jpeg, apiKey: key, model: model)
                 } catch let error as VisionError {
                     lastFailure = error
+                    await ChessDebugLog.shared.record("ERROR", "Gemini request failed", details: "Model: \(model)\nAttempt: \(attempt + 1)\nError: \(error.localizedDescription)")
 
                     guard case let .http(status, message) = error else { throw error }
                     if Self.isAuthenticationFailure(status: status) { throw error }
@@ -79,14 +89,18 @@ struct GeminiBoardReader {
                     }
 
                     throw error
-                } catch is URLError {
+                } catch let error as URLError {
                     // Network timeouts should not make a scan sit for nearly a minute.
                     lastFailure = .emptyResponse
+                    await ChessDebugLog.shared.record("ERROR", "Gemini network request failed", details: "Model: \(model)\nAttempt: \(attempt + 1)\nNetwork error: \(error.localizedDescription) (code \(error.code.rawValue))")
                     if attempt < Self.retriesPerModel {
                         try await Self.backoff()
                         continue
                     }
                     break
+                } catch {
+                    await ChessDebugLog.shared.record("ERROR", "Unexpected Gemini request error", details: "Model: \(model)\nAttempt: \(attempt + 1)\n\(error.localizedDescription)")
+                    throw error
                 }
             }
         }
@@ -119,10 +133,35 @@ struct GeminiBoardReader {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
+        var debugBody = "<could not format request JSON>"
+        if let requestData = request.httpBody,
+           var root = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any],
+           var contents = root["contents"] as? [[String: Any]],
+           !contents.isEmpty,
+           var parts = contents[0]["parts"] as? [[String: Any]],
+           !parts.isEmpty {
+            parts[0]["inlineData"] = [
+                "mimeType": "image/jpeg",
+                "data": "<base64 image omitted; \(jpeg.count) bytes>"
+            ]
+            contents[0]["parts"] = parts
+            root["contents"] = contents
+            if let safeData = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]),
+               let safeText = String(data: safeData, encoding: .utf8) {
+                debugBody = safeText
+            }
+        }
+
+        await ChessDebugLog.shared.record("REQUEST", "Gemini HTTP request prepared", details: "POST \(url.absoluteString)\nContent-Type: application/json\nx-goog-api-key: [REDACTED]\nBody size: \(request.httpBody?.count ?? 0) bytes including image data.\nSanitized request JSON (image bytes omitted):\n\(debugBody)")
+
         let (data, response) = try await urlSession.data(for: request)
         guard let http = response as? HTTPURLResponse else {
+            await ChessDebugLog.shared.record("RESPONSE", "Invalid HTTP response", details: "URLSession returned a non-HTTP response.")
             throw VisionError.emptyResponse
         }
+        let rawResponse = String(data: data, encoding: .utf8) ?? "<response was not UTF-8>"
+        let visibleResponse = String(rawResponse.prefix(24000))
+        await ChessDebugLog.shared.record("RESPONSE", "Gemini returned HTTP \(http.statusCode)", details: "Headers: \(http.allHeaderFields)\nBody (\(data.count) bytes; clipped at 24,000 characters):\n\(visibleResponse)")
         guard http.statusCode == 200 else {
             throw VisionError.http(http.statusCode, Self.apiMessage(from: data))
         }
@@ -139,8 +178,11 @@ struct GeminiBoardReader {
         guard !text.isEmpty else { throw VisionError.emptyResponse }
 
         do {
-            return try JSONDecoder().decode(GeminiBoardReading.self, from: Data(text.utf8))
+            let reading = try JSONDecoder().decode(GeminiBoardReading.self, from: Data(text.utf8))
+            await ChessDebugLog.shared.record("PARSE", "Gemini board reading decoded", details: "boardVisible: \(reading.boardVisible)\nconfidence: \(reading.confidence)\nrows (far to near; left to right):\n\(reading.rows.joined(separator: "\n"))\nnotes: \(reading.notes ?? "<none>")")
+            return reading
         } catch {
+            await ChessDebugLog.shared.record("ERROR", "Could not decode Gemini board JSON", details: "Decode error: \(error.localizedDescription)\nCandidate text:\n\(text)")
             throw VisionError.malformedReading("could not decode JSON")
         }
     }
