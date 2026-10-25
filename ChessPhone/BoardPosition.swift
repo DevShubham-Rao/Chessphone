@@ -11,9 +11,9 @@ struct ScannedBoard {
 }
 
 enum BoardOrienter {
-    /// The photo is taken from the player's side of the board, so the row nearest the camera is the
-    /// player's home rank. Rotating here (not in the prompt) keeps the model's job purely visual.
-    static func orient(_ reading: GeminiBoardReading, playerColor: PieceColor) throws -> ScannedBoard {
+    /// Gemini must return fixed chess coordinates: rank 8 to rank 1, file a to file h.
+    /// This does not rotate with the player's seat or camera side.
+    static func orient(_ reading: GeminiBoardReading) throws -> ScannedBoard {
         guard reading.boardVisible else { throw VisionError.boardNotVisible }
         guard reading.rows.count == 8, reading.rows.allSatisfy({ $0.count == 8 }) else {
             throw VisionError.malformedReading("expected 8 rows of 8 squares")
@@ -27,9 +27,8 @@ enum BoardOrienter {
                     if ch == "." { continue }
                     throw VisionError.malformedReading("unknown symbol '\(ch)'")
                 }
-                // row 0 = farthest from camera, col 0 = left of the image.
-                let rank = playerColor == .white ? 7 - row : row
-                let file = playerColor == .white ? col : 7 - col
+                let rank = 7 - row
+                let file = col
                 squares[Square.index(file: file, rank: rank)] = decoded
             }
         }

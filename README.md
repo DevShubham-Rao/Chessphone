@@ -21,7 +21,7 @@ The watcher tracks the engine's recommended move separately from the physical bo
 
 The iPhone camera remains a manual testing source. Continuous watch is available only with Ray-Ban Meta because the iPhone fallback currently captures still images rather than publishing a live preview.
 
-This version uses whole-board Gemini recognition after local motion gating. It does not yet draw piece boxes or normalize the board perspective like the video; that would require a dedicated on-device chess-piece detector and board-corner tracker. The glasses preview is configured at 2 FPS, so a real move may take a couple of seconds to register before image recognition and Stockfish search begin.
+This version uses whole-board Gemini recognition after local motion gating. Before recognition, Black-seat camera photos are rotated 180 degrees into a canonical White-seat view; Gemini is then asked for rank 8 to rank 1 and file a to file h for either player. This removes the side-to-move orientation ambiguity, but piece recognition can still fail when the board is blurry, cropped, blocked, or too small in the frame. The glasses preview is configured at 2 FPS, so a real move may take a couple of seconds to register before image recognition and Stockfish search begin.
 
 ## Ray-Ban Meta support
 
@@ -96,7 +96,7 @@ Because it is volume-state observation rather than a formal button-event API, te
 
 - `ChessPhone/GlassesCameraSource.swift`: Meta registration/session/camera/photo capture
 - `ChessPhone/BoardImageSource.swift`: image-source protocol + iPhone fallback
-- `ChessPhone/ImagePreprocessor.swift`: 1024 px JPEG normalization
+- `ChessPhone/ImagePreprocessor.swift`: 896 px JPEG normalization and Black-seat rotation
 - `ChessPhone/GeminiKeyProvider.swift`: Keychain/plist/environment key loading
 - `ChessPhone/GeminiBoardReader.swift`: structured Gemini board reading
 - `ChessPhone/BoardPosition.swift`: orientation, sanity checks, scan-to-move matching, FEN-ready position
@@ -106,11 +106,11 @@ Because it is volume-state observation rather than a formal button-event API, te
 
 ## Debugging an incorrect move
 
-During a game, tap the ladybug icon in the top bar to open **Chess Debug**. Run a scan or enter the move again, then inspect the latest events or tap **Copy log** to copy them for troubleshooting. The log includes the sanitized Gemini request (with image bytes omitted), full response text, decoded board rows, oriented board, tracked FEN, legal move list, changed squares, and accepted/rejected move details. The API key is redacted; logs are kept in memory and are cleared when you tap **Clear**. If a scan is an unambiguous near match to exactly one legal position, the app can now repair a one-square piece placement error; it still rejects ambiguous or larger differences.
+During a game, tap the ladybug icon in the top bar to open **Chess Debug**. Run a scan or enter the move again, then inspect the latest events or tap **Copy log** to copy them for troubleshooting. The log includes the sanitized Gemini request (with image bytes omitted), full response text, decoded board rows, mapped board, tracked FEN, legal move list, changed squares, and accepted/rejected move details. The API key is redacted; logs are kept in memory and are cleared when you tap **Clear**. Board rows always use rank 8 to rank 1 and file a to file h, regardless of whether the player chose White or Black. If a scan is an unambiguous near match to exactly one legal position, the app can now repair a one-square piece placement error; it still rejects ambiguous or larger differences.
 
 ## Testing status
 
-The debug overlay has not been compiled in this editing environment because the Swift compiler and Xcode are unavailable. Build it in Xcode before installing. It also requires a real Apple/Meta environment for:
+The debug overlay and camera-orientation update have not been compiled in this editing environment because the Swift compiler and Xcode are unavailable. Build it in Xcode before installing. It also requires a real Apple/Meta environment for:
 
 - Xcode compile/link against the Meta binary SDK
 - Meta AI registration callback

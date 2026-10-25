@@ -6,7 +6,9 @@ enum ImagePreprocessor {
     static var maxEdge: CGFloat = 896
     static var jpegQuality: CGFloat = 0.72
 
-    static func jpegData(from image: UIImage) throws -> Data {
+    /// Produces a canonical White-seat view. When the user is sitting as Black, the camera
+    /// sees the board rotated 180 degrees relative to the file/rank convention used below.
+    static func jpegData(from image: UIImage, rotate180: Bool = false) throws -> Data {
         // UIImage.size is in points; convert to real pixels first.
         let pixelSize = CGSize(width: image.size.width * image.scale,
                                height: image.size.height * image.scale)
@@ -21,6 +23,11 @@ enum ImagePreprocessor {
         format.scale = 1                               // 1 point == 1 pixel in the output
         format.opaque = true
         let resized = UIGraphicsImageRenderer(size: target, format: format).image { _ in
+            if rotate180 {
+                let context = UIGraphicsGetCurrentContext()!
+                context.translateBy(x: target.width, y: target.height)
+                context.rotate(by: .pi)
+            }
             image.draw(in: CGRect(origin: .zero, size: target))   // also bakes in EXIF orientation
         }
 

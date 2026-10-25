@@ -3,7 +3,7 @@ import Foundation
 /// What we ask Gemini to return. The model only reports what it SEES; the app does all chess logic.
 struct GeminiBoardReading: Decodable {
     let boardVisible: Bool
-    /// 8 strings of 8 characters, FARTHEST row first, LEFT of the image first.
+    /// 8 strings of 8 characters in canonical coordinates: rank 8 to rank 1, file a to h.
     /// "PNBRQK" = white, "pnbrqk" = black, "." = empty.
     let rows: [String]
     let confidence: String       // "high" | "medium" | "low"
@@ -28,8 +28,10 @@ struct GeminiBoardReader {
     private static let prompt = """
     Read only the physical chessboard in this photo. Ignore any phone screen, app interface, reflection,
     or text that may be visible; never use a displayed chessboard as a substitute for the physical board.
-    Return exactly 8 rows from FARTHEST to NEAREST to the camera, and within each row LEFT to RIGHT in the image.
-    Each row must contain exactly 8 characters.
+    The photo has already been normalized to look from White's seat: White is nearest the camera,
+    Black is farthest, and file a is on the image-left. Return the board from farthest rank to nearest:
+    rank 8 first, then rank 7 down to rank 1. Within each row, return files a through h from image-left
+    to image-right. Do not infer a different orientation. Each row must contain exactly 8 characters.
     Use PNBRQK for white pieces, pnbrqk for black pieces, and . for empty squares.
     Report only pieces you can actually see on the physical squares. Do not guess, reconstruct, or assume a
     standard setup or legal move. If hands, objects, blur, or framing hide any part of the board, set confidence=low

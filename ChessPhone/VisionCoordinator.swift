@@ -108,11 +108,12 @@ final class VisionCoordinator: ObservableObject {
     func readBoard(from image: UIImage, playerColor: PieceColor) async throws -> ScannedBoard {
         do {
             stage = .reading
-            let jpeg = try ImagePreprocessor.jpegData(from: image)
-            await ChessDebugLog.shared.record("IMAGE", "Image prepared for Gemini", details: "Original image: \(Int(image.size.width))×\(Int(image.size.height)) points\nJPEG sent: \(jpeg.count) bytes\nOrientation mapping: \(playerColor.name) seat")
+            let rotate180 = playerColor == .black
+            let jpeg = try ImagePreprocessor.jpegData(from: image, rotate180: rotate180)
+            await ChessDebugLog.shared.record("IMAGE", "Image prepared for Gemini", details: "Original image: \(Int(image.size.width))×\(Int(image.size.height)) points\nJPEG sent: \(jpeg.count) bytes\nPlayer color: \(playerColor.name)\nCamera view normalized: \(rotate180 ? "rotated 180° to White-seat view" : "already White-seat view")\nOutput coordinates: rank 8 to rank 1, file a to file h")
             let reading = try await reader.readBoard(jpeg: jpeg)
-            let board = try BoardOrienter.orient(reading, playerColor: playerColor)
-            await ChessDebugLog.shared.record("BOARD", "Gemini board oriented to chess coordinates", details: "Player at camera side: \(playerColor.name)\nConfidence: \(board.confidence)\nNotes: \(board.notes ?? "<none>")\nBoard (rank 8 at top):\n\(ChessDebugFormat.board(board.squares))")
+            let board = try BoardOrienter.orient(reading)
+            await ChessDebugLog.shared.record("BOARD", "Gemini board mapped to fixed chess coordinates", details: "Player color: \(playerColor.name)\nConfidence: \(board.confidence)\nNotes: \(board.notes ?? "<none>")\nBoard (rank 8 at top, file a at left):\n\(ChessDebugFormat.board(board.squares))")
             stage = .done
             return board
         } catch {
