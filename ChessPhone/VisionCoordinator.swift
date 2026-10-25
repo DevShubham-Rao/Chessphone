@@ -140,6 +140,21 @@ struct VisionSettingsSection: View {
             Picker("Camera", selection: $vision.sourceKind) {
                 ForEach(VisionCoordinator.SourceKind.allCases) { Text($0.title).tag($0) }
             }
+            Picker("Board reader", selection: Binding(
+                get: { ChessRecognitionMode(rawValue: UserDefaults.standard.string(forKey: "ChessPhone.recognition.mode") ?? "gemini") ?? .gemini },
+                set: { UserDefaults.standard.set($0.rawValue, forKey: "ChessPhone.recognition.mode") }
+            )) {
+                Text("Gemini").tag(ChessRecognitionMode.gemini)
+                Text("My local model").tag(ChessRecognitionMode.local).disabled(!ChessRecognitionMode.localModelInstalled)
+            }
+            .disabled(!ChessRecognitionMode.localModelInstalled)
+            Text(ChessRecognitionMode.localModelInstalled
+                 ? "Choose Gemini or the installed chess model."
+                 : "Gemini is ready. My local model becomes selectable after a trained ChessBoardClassifier model is added to a future build.")
+                .font(.caption).foregroundStyle(.secondary)
+            NavigationLink(destination: BoardTrainerView()) {
+                Label("Board Trainer & Data Export", systemImage: "brain.head.profile")
+            }
             if vision.sourceKind == .glasses {
                 Button("Connect Ray-Ban Meta glasses") {
                     Task {

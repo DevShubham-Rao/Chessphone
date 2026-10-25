@@ -4,6 +4,10 @@ Named presets, vibration toggles, configurable invalid-move feedback, on-screen 
 
 # ChessPhone + Ray-Ban Meta Board Scan
 
+## Board Trainer
+
+Open **Vibration & Audio Settings → Board Trainer & Data Export**. Choose a clear board photo, optionally use Gemini to fill a draft, correct the labels square by square, and save the example. The app stores the photo with its corrected 8×8 board labels and can export the collection as `ChessPhone-Training-Data.json` for safekeeping and future model training. The `My local model` option remains disabled until a compatible `ChessBoardClassifier` Core ML model is included in a later build. Collecting examples preserves training data; it does not train a local neural model by itself.
+
 ChessPhone is an iOS chess assistant that combines:
 
 - Ray-Ban Meta camera capture through Meta Wearables Device Access Toolkit (DAT) 1.0.0
